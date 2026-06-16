@@ -3,7 +3,9 @@ venv/
 *.pyc
 *.cpython-312.pyc
 _pycache_/
+__pycache__/
 results/
+.vscode/
 
 Results/.ipynb_checkpoints/
 Results/__pycache__/
