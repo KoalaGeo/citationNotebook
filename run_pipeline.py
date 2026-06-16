@@ -148,7 +148,7 @@ def run_pipeline():
     overton_final_df.to_pickle(INTERMEDIATE_DIR / "latest_results_overton.pkl")
 
     # -------------------------------------------------------------------------
-    # STEP 5: Merge, Format, & Filter Results (Replaces nerc_dataset_citations_merge_results.ipynb)
+    # STEP 5: Merge, Format, & Filter Results
     # -------------------------------------------------------------------------
     print("\n[Step 5/5] Merging and deduplicating cross-platform data streams...")
     
@@ -161,13 +161,26 @@ def run_pipeline():
     combined_df = merge_citation_dfs(df_list)
     print(f"--> Aggregated raw row count: {len(combined_df)} records.")
 
+    if args.test_mode:
+        # Cap the dataframe to ensure the network loop below doesn't run wild
+        combined_df = combined_df.head(args.test_limit).copy()
+
     # Generate custom bibliographic string lines via Crossref formatting engine
     print("--> Resolving academic bibliography output strings (get_citation_str)...")
-    if args.test_mode:
-        # Cap this slow network loop during testing cycles
-        combined_df = combined_df.head(args.test_limit).copy()
     
-    combined_df['pub_citation_str'] = get_citation_str(combined_df)
+    citation_output = get_citation_str(combined_df)
+    
+    if isinstance(citation_output, pd.DataFrame):
+        # If the function returned a whole modified DataFrame, adopt it
+        combined_df = citation_output
+        
+        # Ensure the column naming matches downstream expectations
+        if 'pub_citation_str' not in combined_df.columns and 'PubCitationStr' in combined_df.columns:
+            combined_df = combined_df.rename(columns={'PubCitationStr': 'pub_citation_str'})
+    else:
+        # If it returned a list or Series, assign it directly
+        combined_df['pub_citation_str'] = citation_output
+    # ---------------------------------------------------------
 
     # Run clean rules (skipping pre-print replies, bad years, GBIF, etc.)
     print("--> Executing filtration rules...")
@@ -198,7 +211,3 @@ def run_pipeline():
     print(f"Final Filtered Citations Count: {len(kept_df)}")
     print(f"Outputs written safely to: {FINAL_DIR.resolve()}")
     print("=" * 60)
-
-
-if __name__ == "__main__":
-    run_pipeline()
