@@ -1,19 +1,5 @@
-venv/
-.venv/
-*.pyc
-*.cpython-312.pyc
-_pycache_/
+citations.db
 __pycache__/
-results/
-.vscode/
-
-Results/.ipynb_checkpoints/
-Results/__pycache__/
-citations_fun/__pycache__/
-
-development_code.ipynb
-summarise_results.ipynb
-
-Summary plots/
-
-racs.ipynb
+*.py[cod]
+.venv/
+*.egg-info/

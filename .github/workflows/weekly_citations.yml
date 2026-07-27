@@ -1,0 +1,50 @@
+name: Weekly citation pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 0"   # Sundays 02:00 UTC -- one job replaces the five staggered crons
+
+permissions:
+  contents: write
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # citations.db is a cache, not an artifact: it carries the per-DOI
+      # doi.org metadata and citation-string caches between runs, so a weekly
+      # run only fetches NEW publications. Losing it just means a slower run.
+      - name: Restore citation cache
+        uses: actions/cache@v4
+        with:
+          path: citations.db
+          key: citations-db-${{ github.run_id }}
+          restore-keys: |
+            citations-db-
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run pipeline
+        env:
+          OVERTON_API_KEY: ${{ secrets.OVERTON_API_KEY }}
+        run: python -m citations all --workers 8
+
+      - name: Commit and push results
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git add Results/v3/latest_results.csv Results/v3/latest_results.json \
+                  Results/v3/filtered_out_df.csv \
+                  Results/intermediate_data/nerc_datacite_dois.json
+          git diff --cached --quiet || git commit -m "Weekly citation pipeline run"
+          git push origin HEAD
