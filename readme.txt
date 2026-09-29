@@ -11,8 +11,9 @@ The harvested data is not an exhaustive list of all the citations, and still con
 Usage
 The pipeline is plain Python in the citations_fun package. Install the dependencies with
     pip install -r requirements.txt
-and run each stage from the repository root with
-    python -m citations_fun <stage>
+and run from the repository root, either one stage at a time or everything in order:
+    python -m citations_fun run <stage>
+    python -m citations_fun run all
 
 Stages (each runs as its own weekly GitHub Action, in this order):
     dois      NERC dataset DOIs from DataCite  -> Results/intermediate_data/nerc_datacite_dois.json

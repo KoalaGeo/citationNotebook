@@ -25,7 +25,7 @@ jobs:
       - name: Run pipeline stage
         env:
           PYTHONUNBUFFERED: "1" # Forces Python to print immediately without buffering
-        run: python -m citations_fun dois
+        run: python -m citations_fun run dois
 
 
       - name: Commit and push results

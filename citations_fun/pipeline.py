@@ -3,7 +3,7 @@
 # the same files, so the published results are unchanged. The only format
 # change is that the intermediate .pkl files are now .parquet (see storage.py).
 #
-# Run from the repository root: python -m citations_fun <stage>
+# Run from the repository root: python -m citations_fun run <stage|all>
 
 import json
 from datetime import date
@@ -212,6 +212,7 @@ def run_merge(today=None):
         f.write(json_object)
 
 
+# In dependency order: dois feeds the three sources, which all feed merge.
 STAGES = {
     "dois": run_dois,
     "datacite": run_datacite,
@@ -219,3 +220,10 @@ STAGES = {
     "overton": run_overton,
     "merge": run_merge,
 }
+
+
+def run_all():
+    """Run every stage in order, stopping at the first one that fails."""
+    for name, stage in STAGES.items():
+        print(f"=== Running stage: {name}")
+        stage()
