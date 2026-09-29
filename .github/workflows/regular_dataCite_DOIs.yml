@@ -20,21 +20,19 @@ jobs:
         uses: actions/setup-python@v3
 
       - name: Install dependencies
-        run: pip install papermill ipython ipykernel pandas==2.3.3 requests numpy
+        run: pip install -r requirements.txt
         
-      - name: Run Jupyter Notebook
+      - name: Run pipeline stage
         env:
           PYTHONUNBUFFERED: "1" # Forces Python to print immediately without buffering
-        run: |
-
-          papermill nerc_dataset_DOIs.ipynb executed_notebooks/nerc_dataset_DOIs_executed.ipynb --log-output --log-level INFO # nerc_dataset_citations_part1_executed.ipynb # keep "_executed.ipynb" to see errors
+        run: python -m citations_fun dois
 
 
       - name: Commit and push results
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
-          git add "Results/intermediate_data/nerc_datacite_dois.json" "nerc_dataset_DOIs.ipynb" "executed_notebooks/nerc_dataset_DOIs_executed.ipynb"
+          git add "Results/intermediate_data/nerc_datacite_dois.json"
           git commit -m "Regular action, updates nerc_datacite_dois.json"
           git push https://github.com/NERC-EDS/citationNotebook.git main
 

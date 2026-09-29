@@ -4,6 +4,8 @@ import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from citations_fun.storage import write_parquet
+
 def getOvertonCitations(nerc_datacite_dois_df):
     api_key = "3c7b1a-849d90-77f9da"
     
@@ -139,7 +141,7 @@ def processOvertonResults(results):
     
     # write to file
     overton_df_merged.to_csv("Results/intermediate_data/latest_results_overton.csv", index= False)
-    overton_df_merged.to_pickle("Results/intermediate_data/latest_results_overton.pkl")
+    write_parquet(overton_df_merged, "Results/intermediate_data/latest_results_overton.parquet")
 
 
     return overton_df_merged
