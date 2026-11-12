@@ -231,8 +231,8 @@ def test_full_run(con, settings):
     assert all(r["date_added"] == "2026-10-11" for r in v3)
     grouped = json.loads((settings.v3_dir / "latest_results.json").read_text())
     assert sum(len(v) for v in grouped.values()) == 5
-    filtered = read_csv(settings.v3_dir / "filtered_out_df.csv", encoding="utf-8-sig")
-    assert [r["exclusion_reason"] for r in filtered] == ["predates-data"]
+    filtered = read_csv(settings.v3_dir / "filtered_out_df.csv")
+    assert [r["pub_doi"] for r in filtered] == ["10.1234/old-paper"]          # the excluded link
 
 
 def test_first_seen_survives_and_seeds_from_v3(con, settings):
@@ -353,3 +353,45 @@ def test_overton_without_key_is_skipped_not_failed(con, settings):
     assert published == "success"                      # optional source: a warning, not a block
     manifest = json.loads((settings.v4_dir / "manifest.json").read_text())
     assert any("overton" in w for w in manifest["guards"]["warnings"])
+
+def test_v3_files_keep_the_v3_pipelines_types(con, settings):
+    """The EDS citation API reads Results/v3: v3's float year, placeholders (never empty), columns, encodings."""
+    from citations.publish import V3_FILTERED_COLUMNS, write_v3
+
+    data = {
+        "datasets": [{"doi": A, "data_centre": "NGDC", "data_centre_name": "National Geoscience Data Centre (NGDC)",
+                      "publisher": NGDC, "title": None, "publication_year": 2020, "authors": []}],
+        "works": [{"citing_id": "https://example.org/page", "title": None, "work_type": None, "container_title": None,
+                   "publisher": None, "issued": "2021", "authors": [], "citation_text": "https://example.org/page"},
+                  {"citing_id": "10.1234/old", "title": "Old", "work_type": "journal-article", "container_title": "J",
+                   "publisher": "P", "issued": "2015-03", "authors": [{"given": "Ann", "family": "Smith"}],
+                   "citation_text": "Smith (2015). Old."}],
+        "links": [{"data_doi": A, "citing_id": "https://example.org/page", "citing_id_type": "url", "counted": True,
+                   "status": "included", "relation_type": "IsCitedBy", "sources": ["datacite:metadata"],
+                   "first_seen": "2026-10-01", "exclusion_reason": None},
+                  {"data_doi": A, "citing_id": "10.1234/old", "citing_id_type": "doi", "counted": False,
+                   "status": "excluded", "relation_type": "IsCitedBy", "sources": ["scholexplorer"],
+                   "first_seen": "2026-10-01", "exclusion_reason": "predates-data"}],
+    }
+    write_v3(settings, data)
+
+    raw = (settings.v3_dir / "latest_results.csv").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")                                    # BOM, as v3 wrote it
+    row = read_csv(settings.v3_dir / "latest_results.csv", encoding="utf-8-sig")[0]
+    assert row["data_publication_year"] == "2020.0"
+    assert row["data_title"] == "No title given"
+    assert row["publication_title"] == row["pub_publisher"] == row["publication_type"] == "Info not given"
+    assert row["publication_date"] == "2021"                                     # dates are not padded
+
+    raw = (settings.v3_dir / "filtered_out_df.csv").read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")                                # no BOM, as v3 wrote it
+    filtered = read_csv(settings.v3_dir / "filtered_out_df.csv")
+    assert list(filtered[0]) == V3_FILTERED_COLUMNS and len(V3_FILTERED_COLUMNS) == 14
+    assert filtered[0]["data_publication_year"] == "2020.0" and filtered[0]["pub_date"] == "2015-03"
+
+    text = (settings.v3_dir / "latest_results.json").read_text(encoding="utf-8")
+    assert "\n" not in text                                                    # one line
+    record = json.loads(text)["National Geoscience Data Centre (NGDC)"][0]
+    assert isinstance(record["data_publication_year"], float)
+    assert None not in (record["data_title"], record["publication_title"], record["pub_publisher"],
+                        record["publication_type"], record["PubCitationStr"])
