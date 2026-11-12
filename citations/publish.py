@@ -40,7 +40,11 @@ V3_COLUMNS = ["data_doi", "data_publisher", "data_title", "data_publication_year
               "data_doi_url", "publication_doi_url", "date_added"]
 V3_FILTERED_COLUMNS = ["data_doi", "data_publisher", "data_title", "data_publication_year", "data_authors",
                        "relation_type", "pub_doi", "pub_title", "pub_date", "pub_authors", "source_id",
-                       "pub_publisher", "pub_type", "publicationYear", "exclusion_reason"]
+                       "pub_publisher", "pub_type", "publicationYear"]
+# The EDS citation API reads Results/v3, so its files keep the v3 pipeline's types: a float
+# data_publication_year, and its placeholder text where a value is missing (never empty or null).
+V3_NO_TITLE = "No title given"
+V3_MISSING = "Info not given"
 LEGACY_SOURCE = {"datacite": "datacite", "scholexplorer": "scholex", "overton": "overton", "crossref": "crossref"}
 
 
@@ -81,11 +85,13 @@ def write_csv(path: Path, columns: list[str], rows: list[dict], cell=_cell, enco
     _atomic(path, write, encoding)
 
 
-def write_json(path: Path, data, lines: bool = False):
+def write_json(path: Path, data, lines: bool = False, compact: bool = False):
     def write(handle):
         if lines:
             for record in data:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        elif compact:
+            json.dump(data, handle, ensure_ascii=False)   # one line, no trailing newline, as v3 wrote it
         else:
             json.dump(data, handle, ensure_ascii=False, indent=None if isinstance(data, list) else 2)
             handle.write("\n")
@@ -170,24 +176,28 @@ def v3_rows(data: dict) -> tuple[list[dict], list[dict]]:
         pub_authors = _authors_names(work.get("authors"))
         publisher = ds["data_centre_name"] or ds["publisher"] or UNKNOWN_CENTRE_NAME
         issued = work.get("issued")
+        year = ds["publication_year"]
         base = {
             "data_doi": ds["doi"],
             "data_publisher": publisher,
-            "data_title": ds["title"],
-            "data_publication_year": ds["publication_year"],
+            "data_title": ds["title"] or V3_NO_TITLE,
+            "data_publication_year": float(year) if year is not None else None,
             "data_authors": _authors_names(ds["authors"]),
         }
+        title = work.get("title") or V3_MISSING
+        container = work.get("container_title") or work.get("publisher") or V3_MISSING
+        work_type = work.get("work_type") or V3_MISSING
         if link["counted"]:
             kept.append({
                 **base,
                 "relation_type_id": to_kebab(link["relation_type"]),
                 "publication_doi": link["citing_id"],
-                "publication_title": work.get("title"),
+                "publication_title": title,
                 "publication_date": issued,
                 "publication_authors": pub_authors,
                 "citation_event_source": source,
-                "pub_publisher": work.get("container_title") or work.get("publisher"),
-                "publication_type": work.get("work_type"),
+                "pub_publisher": container,
+                "publication_type": work_type,
                 "publicationYear": issued[:4] if issued else None,
                 "PubCitationStr": work.get("citation_text"),
                 "data_doi_url": f"doi.org/{ds['doi']}",
@@ -199,14 +209,13 @@ def v3_rows(data: dict) -> tuple[list[dict], list[dict]]:
                 **base,
                 "relation_type": to_kebab(link["relation_type"]),
                 "pub_doi": link["citing_id"],
-                "pub_title": work.get("title"),
+                "pub_title": title,
                 "pub_date": issued,
                 "pub_authors": pub_authors,
                 "source_id": source,
-                "pub_publisher": work.get("container_title") or work.get("publisher"),
-                "pub_type": work.get("work_type"),
+                "pub_publisher": container,
+                "pub_type": work_type,
                 "publicationYear": issued[:4] if issued else None,
-                "exclusion_reason": link["exclusion_reason"],
             })
     return kept, filtered
 
@@ -220,13 +229,14 @@ def _v3_cell(value):
 
 def write_v3(settings, data: dict):
     kept, filtered = v3_rows(data)
-    # utf-8-sig, as v3 wrote it, so Excel opens it correctly.
+    # Encodings as v3 wrote them: latest_results.csv with a BOM (so Excel opens it correctly),
+    # filtered_out_df.csv without. The JSON on one line.
     write_csv(settings.v3_dir / "latest_results.csv", V3_COLUMNS, kept, cell=_v3_cell, encoding="utf-8-sig")
-    write_csv(settings.v3_dir / "filtered_out_df.csv", V3_FILTERED_COLUMNS, filtered, cell=_v3_cell, encoding="utf-8-sig")
+    write_csv(settings.v3_dir / "filtered_out_df.csv", V3_FILTERED_COLUMNS, filtered, cell=_v3_cell, encoding="utf-8")
     grouped = defaultdict(list)
     for row in kept:
         grouped[row["data_publisher"]].append({k: v for k, v in row.items() if k != "data_publisher"})
-    write_json(settings.v3_dir / "latest_results.json", dict(sorted(grouped.items())))
+    write_json(settings.v3_dir / "latest_results.json", dict(sorted(grouped.items())), compact=True)
     return len(kept), len(filtered)
 
 

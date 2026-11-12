@@ -214,19 +214,18 @@ erDiagram
 
 ## Results/v3 (deprecated)
 
-Still written each run, from v4: included, counted links only, in the same 18 columns, with `date_added` taken from `first_seen`. Differences consumers may notice:
+Still written each run, from v4: included, counted links only, with `date_added` taken from `first_seen`. The EDS citation API reads these files, so they keep the v3 pipeline's shape and types: the same 18 columns (14 in `filtered_out_df.csv`) in the same order, the same encodings (`latest_results.csv` with a BOM, `filtered_out_df.csv` without), the JSON on one line, `data_publication_year` as a float (`2012.0`), and v3's placeholder text where a value is missing (`No title given` for `data_title`; `Info not given` for `publication_title`, `pub_publisher` and `publication_type`), never an empty cell or `null`. Section 1c of `inspect_results.ipynb` checks this against upstream's files. Differences in content consumers may notice:
 
 - **Fewer, more accurate rows.** Similarity, dataset-to-dataset and version links are no longer in it.
 - EGUsphere preprints (`10.5194/egusphere-2023-…`) are in it. v3 excluded every EGUsphere DOI as a conference abstract; only EGU General Assembly abstracts are excluded now.
 - `publication_date` is ISO 8601 at the precision known: `YYYY-MM-DD`, `YYYY-MM` or `YYYY` (was D/M/YYYY).
 - `publication_authors` is a list of `"Family, Given"` strings for every source (DataCite rows were a list of `[given, family]` pairs).
-- `data_publication_year` is an integer (`2012`, was `2012.0`).
-- Missing values are empty cells instead of placeholders such as `Info not given` or `not a doi` (`publication_authors` is `[]`).
+- A work with no authors has `publication_authors` `[]` (was `Info not given` or `not a doi`).
 - `publication_type` is a Crossref type on every row (`journal-article`, `posted-content` …), as it was for most rows before; Scholexplorer's and Overton's `Publication` become `other` and `report`.
 - `PubCitationStr` is never empty: a work with nothing to build a citation from has a link to it instead.
 - `relation_type_id` is the dataset-side relation in kebab case (`is-cited-by`).
 - `citation_event_source` is one of `datacite`, `scholex`, `overton`, `crossref`.
-- `filtered_out_df.csv` gains an `exclusion_reason` column.
+- Why each link in `filtered_out_df.csv` was excluded is in `Results/v4/links.csv` (`exclusion_reason`); the v3 file keeps its 14 columns.
 
 `Results/v1` and `Results/v2` are no longer updated.
 
