@@ -19,6 +19,19 @@ A, B, C = "10.5285/aaaa-ngdc", "10.5285/bbbb-pdc", "10.5285/cccc-pdc"
 
 
 def record(doi, publisher, year, citations=0, related=()):
+    """A DataCite JSON:API record for a test dataset.
+
+    Args:
+        doi: The dataset's DOI.
+        publisher: The publisher name, which decides the data centre.
+        year: The publication year.
+        citations: DataCite's ``citationCount``.
+        related: ``(relationType, relatedIdentifierType, relatedIdentifier)``
+            tuples for ``relatedIdentifiers``.
+
+    Returns:
+        The record.
+    """
     return {"id": doi, "type": "dois", "attributes": {
         "doi": doi, "titles": [{"title": f"Dataset {doi[-8:]}"}], "publisher": {"name": publisher},
         "publicationYear": year, "types": {"resourceTypeGeneral": "Dataset"}, "registered": f"{year}-01-01T00:00:00Z",
@@ -46,6 +59,7 @@ class World:
     """Mutable fake APIs, so a test can break one source."""
 
     def __init__(self):
+        """Start with every API working and DataCite reporting three datasets."""
         self.total = 3
         self.scholix_fail = set()
         self.scholix_empty = False
@@ -53,6 +67,16 @@ class World:
 
     # DataCite REST
     def dois(self, path, params):
+        """DataCite ``/dois``: two pages of the inventory (repeating one record), or one dataset's record.
+
+        Args:
+            path: The request path.
+            params: The query parameters.
+
+        Returns:
+            A page of records, dataset A's record with its citations, or None (404)
+            for any other dataset.
+        """
         if path == "/dois":
             if params.get("page[cursor]") == "1":
                 return {"data": RECORDS[:2], "meta": {"total": self.total},
@@ -66,6 +90,15 @@ class World:
         return None
 
     def events(self, path, params):
+        """DataCite ``/events`` for dataset A: a Crossref reference, a metadata relation and a usage event to ignore.
+
+        Args:
+            path: The request path.
+            params: The query parameters.
+
+        Returns:
+            One page of events.
+        """
         assert params["doi"] == A
         return {"data": [
             {"attributes": {"subj-id": "https://doi.org/10.1234/article-x", "obj-id": f"https://doi.org/{A}",
@@ -78,6 +111,21 @@ class World:
 
     # Scholexplorer
     def scholix(self, path, params):
+        """Scholexplorer ``/v3/Links`` for a dataset.
+
+        Fails for DOIs in ``scholix_fail`` and returns nothing when
+        ``scholix_empty`` is set.
+
+        Args:
+            path: The request path.
+            params: The query parameters, with ``targetPid``.
+
+        Returns:
+            One page of Scholix links.
+
+        Raises:
+            citations.http.HttpError: For a DOI in ``scholix_fail``.
+        """
         doi = params["targetPid"]
         if doi in self.scholix_fail:
             raise HttpError("HTTP 503")
@@ -95,16 +143,47 @@ class World:
 
     @staticmethod
     def _link(name, subtype, scheme, ident, title, date="2021-03-01"):
+        """One Scholix link with its citing work.
+
+        Args:
+            name: The relationship name.
+            subtype: The relationship subtype.
+            scheme: The citing work's identifier scheme.
+            ident: The citing work's identifier.
+            title: The citing work's title.
+            date: The citing work's publication date.
+
+        Returns:
+            The link.
+        """
         return {"RelationshipType": {"Name": name, "SubType": subtype},
                 "source": {"Identifier": [{"ID": ident, "IDScheme": scheme}], "Title": title, "PublicationDate": date,
                            "Type": "publication", "Publisher": [{"name": "Journal"}], "Creator": [{"name": "Smith, A."}]}}
 
     # Overton
     def overton_set(self, path, data):
+        """Overton ``generate_id_set.php``: create the DOI set.
+
+        Args:
+            path: The request path.
+            data: The form data, with the inventory's DOIs.
+
+        Returns:
+            The set's id.
+        """
         assert A in data["dois"]
         return {"set": "set:1"}
 
     def overton_docs(self, path, params):
+        """Overton ``documents.php``: one policy document citing datasets A and B.
+
+        Args:
+            path: The request path.
+            params: The query parameters.
+
+        Returns:
+            One page of documents.
+        """
         return {"results": [{
             "title": "A policy", "published_on": "2023-01-01", "document_url": "https://gov.example/policy.pdf",
             "source": {"title": "UK Government"}, "authors": ["Department X"],
@@ -113,6 +192,15 @@ class World:
 
     # Crossref
     def datacitations(self, path, params):
+        """Crossref ``/beta/datacitations``: one supplement link for dataset A.
+
+        Args:
+            path: The request path.
+            params: The query parameters, with ``object-id``.
+
+        Returns:
+            One page of data citations.
+        """
         items = []
         if params["object-id"] == A:
             items = [{"relation": "is_part_of", "subject": {"id": "10.1234/article-z", "type": "journal-article"},
@@ -120,6 +208,18 @@ class World:
         return {"status": "ok", "message": {"total-results": len(items), "next-page": None, "items": items}}
 
     def crossref_works(self, path, params):
+        """Crossref ``/works/{doi}`` for the citing works it knows.
+
+        Args:
+            path: The request path.
+            params: The query parameters.
+
+        Returns:
+            The work's record, or None (404) for a DOI it does not know.
+
+        Raises:
+            citations.http.HttpError: For a DOI in ``crossref_fail``.
+        """
         doi = path[len("/works/"):].lower()
         if doi in self.crossref_fail:
             raise HttpError("HTTP 503")
@@ -131,6 +231,11 @@ class World:
                             "container-title": ["Journal X"], "publisher": "Pub", "author": [{"given": "Ann", "family": "Smith"}]}}
 
     def client(self):
+        """A fake client that answers from this world's APIs.
+
+        Returns:
+            A `conftest.FakeClient`.
+        """
         return FakeClient({
             ("api.datacite.org", "/dois"): self.dois,
             ("api.datacite.org", "/events"): self.events,
@@ -143,21 +248,53 @@ class World:
 
 
 class FakeFormatter:
+    """A stand-in for DOI content negotiation that formats a citation for any DOI."""
+
     class Response:
+        """A 200 response with a citation as its body."""
+
         def __init__(self, text):
+            """Create the response.
+
+            Args:
+                text: The body.
+            """
             self.status_code, self.text, self.encoding = 200, text, None
 
     def get(self, url, headers=None, timeout=None):
+        """Answer a content-negotiation request with a citation for the DOI.
+
+        Args:
+            url: The ``doi.org`` URL.
+            headers: Ignored.
+            timeout: Ignored.
+
+        Returns:
+            A `FakeFormatter.Response`.
+        """
         doi = url.split("doi.org/", 1)[1]
         return self.Response(f"Smith, A. (2021). A formatted citation for {doi}. Journal X.")
 
 
 @pytest.fixture(autouse=True)
 def no_network_formatter(monkeypatch):
+    """Make every test in this module format citations with `FakeFormatter`, never the network."""
     monkeypatch.setattr(citation_text, "_session", lambda: FakeFormatter())
 
 
 def run_all(con, settings, world, sources=("datacite", "scholexplorer", "overton", "crossref")):
+    """Run every stage against a fake world, checking the stages that must succeed.
+
+    Args:
+        con: The store connection.
+        settings: The test settings.
+        world: The fake APIs.
+        sources: The sources to harvest.
+
+    Returns:
+        ``(statuses, published)``: each source's harvest status, and the publish
+        status.
+    """
     client = world.client()
     ctx = make_ctx(con, client, settings)
     assert run_inventory(con, client, settings.client_id) == "success"
@@ -168,11 +305,27 @@ def run_all(con, settings, world, sources=("datacite", "scholexplorer", "overton
 
 
 def read_csv(path, encoding="utf-8"):
+    """Read a CSV file as a list of dicts.
+
+    Args:
+        path: The file.
+        encoding: Its encoding; ``"utf-8-sig"`` for a file with a BOM.
+
+    Returns:
+        The rows.
+    """
     with open(path, encoding=encoding, newline="") as handle:
         return list(csv.DictReader(handle))
 
 
 def test_full_run(con, settings):
+    """A full run publishes the expected links, datasets, works, manifest and v3 files.
+
+    Covers merging one link found by two sources, the most specific relation
+    winning, dataset links, exclusions, outgoing relations being dropped,
+    ISO dates, the Crossref work-type vocabulary, link citations for works with
+    no metadata, the manifest's file hashes, and the v3 files' columns.
+    """
     statuses, published = run_all(con, settings, World())
     assert set(statuses.values()) == {"success"}
     assert published == "success"
@@ -236,6 +389,7 @@ def test_full_run(con, settings):
 
 
 def test_first_seen_survives_and_seeds_from_v3(con, settings):
+    """A fresh store takes first-seen dates from v3's ``date_added``; new links get today's date."""
     settings.v3_dir.mkdir(parents=True)
     with open(settings.v3_dir / "latest_results.csv", "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=V3_COLUMNS)
@@ -248,6 +402,7 @@ def test_first_seen_survives_and_seeds_from_v3(con, settings):
 
 
 def test_failed_source_blocks_publishing_and_keeps_results(con, settings):
+    """A failed required source blocks publishing and leaves the published files alone; the next run resumes it."""
     world = World()
     run_all(con, settings, world)
     before = (settings.v4_dir / "links.csv").read_text()
@@ -272,6 +427,7 @@ def test_failed_source_blocks_publishing_and_keeps_results(con, settings):
 
 
 def test_a_harvest_that_loses_most_rows_is_rejected(con, settings):
+    """A harvest that loses most of its links is rejected, the previous harvest stays in use, and publishing is blocked."""
     world = World()
     run_all(con, settings, world)
     good = db.good_run(con, "scholexplorer")["good_run_id"]
@@ -282,6 +438,7 @@ def test_a_harvest_that_loses_most_rows_is_rejected(con, settings):
 
 
 def test_a_real_drop_can_be_accepted(con, settings):
+    """``accept_drop`` lets a real drop through, for the harvest and for publishing, and the manifest records it."""
     world = World()
     run_all(con, settings, world)
     world.scholix_empty = True
@@ -308,6 +465,7 @@ def test_a_real_drop_can_be_accepted(con, settings):
 
 
 def test_a_partial_harvest_is_resumed_by_next_weeks_run(con, settings):
+    """A partial harvest seven days old is resumed by the next run, not started again."""
     world = World()
     run_all(con, settings, world)
     world.scholix_fail = {A, B, C}
@@ -322,6 +480,7 @@ def test_a_partial_harvest_is_resumed_by_next_weeks_run(con, settings):
 
 
 def test_a_failed_metadata_lookup_is_retried_next_run(con, settings):
+    """A work whose metadata lookup failed uses the source's hint for now and is looked up again next run."""
     world = World()
     world.crossref_fail = {"10.1234/article-x"}
     run_all(con, settings, world)
@@ -336,6 +495,7 @@ def test_a_failed_metadata_lookup_is_retried_next_run(con, settings):
 
 
 def test_incomplete_inventory_is_not_used(con, settings):
+    """An inventory with fewer DOIs than DataCite reports fails and leaves the previous one in place."""
     world = World()
     client = world.client()
     assert run_inventory(con, client, settings.client_id) == "success"
@@ -346,6 +506,7 @@ def test_incomplete_inventory_is_not_used(con, settings):
 
 
 def test_overton_without_key_is_skipped_not_failed(con, settings):
+    """Without an Overton key, Overton is skipped and publishing goes ahead with a warning."""
     settings.overton_api_key = None
     world = World()
     statuses, published = run_all(con, settings, world)
@@ -355,7 +516,12 @@ def test_overton_without_key_is_skipped_not_failed(con, settings):
     assert any("overton" in w for w in manifest["guards"]["warnings"])
 
 def test_v3_files_keep_the_v3_pipelines_types(con, settings):
-    """The EDS citation API reads Results/v3: v3's float year, placeholders (never empty), columns, encodings."""
+    """The v3 files keep the v3 pipeline's types, placeholders, columns and encodings.
+
+    The EDS citation API reads ``Results/v3``, so this checks v3's float year,
+    its placeholders (never empty), unpadded dates, the BOM on
+    ``latest_results.csv`` only, the 14 filtered columns, and one-line JSON.
+    """
     from citations.publish import V3_FILTERED_COLUMNS, write_v3
 
     data = {

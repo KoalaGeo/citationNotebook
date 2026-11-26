@@ -1,3 +1,5 @@
+"""Tests for the work-type vocabulary (``citations.worktypes``) and links for citing works."""
+
 import pytest
 
 from citations import db
@@ -28,10 +30,12 @@ from citations.worktypes import CROSSREF_TYPES, crossref_type, datacite_type
     ("", "crossref", None),
 ])
 def test_crossref_type(value, source, expected):
+    """Crossref, CSL, DataCite, Scholexplorer and Overton type names each map to a Crossref type."""
     assert crossref_type(value, source) == expected
 
 
 def test_every_result_is_a_crossref_type_and_mapping_is_idempotent():
+    """Every mapped type is a Crossref type, and mapping it again leaves it unchanged."""
     for value, source in [("article-journal", "datacite"), ("Working paper", "overton"), ("Image", None),
                           ("publication", "scholexplorer"), ("Scholarly article", "overton")]:
         once = crossref_type(value, source)
@@ -40,6 +44,7 @@ def test_every_result_is_a_crossref_type_and_mapping_is_idempotent():
 
 
 def test_datacite_type_prefers_resource_type_general():
+    """A DataCite record's resourceTypeGeneral is used unless it is too broad, when the CSL type is used."""
     assert datacite_type({"resourceTypeGeneral": "Preprint", "citeproc": "article"}) == "posted-content"
     assert datacite_type({"resourceTypeGeneral": "Text", "citeproc": "article-journal"}) == "journal-article"
     assert datacite_type({"resourceTypeGeneral": "Dataset", "citeproc": "dataset"}) == "dataset"
@@ -48,6 +53,7 @@ def test_datacite_type_prefers_resource_type_general():
 
 
 def test_types_cached_before_normalisation_are_mapped_once(tmp_path):
+    """Work types stored before normalisation are mapped when the store is opened, and only once."""
     path = tmp_path / "s.sqlite"
     con = db.connect(path)
     con.executemany("INSERT INTO works (citing_id, work_type, metadata_source) VALUES (?, ?, ?)", [
@@ -72,4 +78,5 @@ def test_types_cached_before_normalisation_are_mapped_once(tmp_path):
     ("hdl:10013/epic.1", "handle", "https://hdl.handle.net/10013/epic.1"),
 ])
 def test_work_url(citing_id, kind, expected):
+    """Each identifier type gives a resolvable link."""
     assert work_url(citing_id, kind) == expected

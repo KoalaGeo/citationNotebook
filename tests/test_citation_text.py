@@ -27,10 +27,12 @@ ERRORS_SEEN_IN_RESULTS = [
     (float("nan"), None),
 ])
 def test_normalise_doi(value, expected):
+    """DOIs are found in bare, ``doi:``, ``doi.org``, publisher-URL, doubled-prefix and URL-encoded forms, and not in query strings or placeholders."""
     assert gcs.normalise_doi(value) == expected
 
 
 def test_normalise_doi_ignores_the_cited_dataset():
+    """A URL that contains the cited dataset's own DOI does not give that DOI, whatever its case."""
     assert gcs.normalise_doi("https://catalogue.example/doc/10.5285/abc", data_doi="10.5285/ABC") is None
 
 
@@ -43,10 +45,12 @@ APA = ("Griffiths, H. M., Ashton, L. A., Walker, A. E., Hasan, F., Evans, T. A.,
 
 @pytest.mark.parametrize("text", ERRORS_SEEN_IN_RESULTS + ["", None, "<html><body>503</body></html>", STYLE_NOT_FOUND])
 def test_error_values_are_not_citations(text):
+    """Formatter error messages, placeholders, HTML pages and JSON errors are not taken as citations."""
     assert not gcs.is_real_citation(text)
 
 
 def test_real_citation_with_not_found_in_title_is_kept():
+    """A real citation whose title happens to contain "not found" is still a citation."""
     text = "Smith J. (2020). Species not found in surveys of upland soils. Ecology 12, 1-9."
     assert gcs.is_real_citation(text)
 
@@ -61,10 +65,12 @@ def test_real_citation_with_not_found_in_title_is_kept():
     ("not a doi", ""),
 ])
 def test_authors(authors, expected):
+    """Author lists in v3's formats become a short list with initials and ``et al.``; placeholders become empty."""
     assert gcs._authors(authors) == expected
 
 
 def test_fallback_for_url_identified_work():
+    """A work with no DOI gets a citation from its metadata, naming an organisation that is author and publisher once."""
     row = {"pub_title": "Scoping the use of predictive models", "pub_authors": "['Joint Nature Conservation Committee']",
            "publicationYear": "2019", "pub_publisher": "Joint Nature Conservation Committee"}
     # An organisation that is both author and publisher is named once.
@@ -74,6 +80,7 @@ def test_fallback_for_url_identified_work():
 
 
 def test_fallback_with_doi_and_date_only():
+    """A fallback citation takes its year from a D/M/YYYY date and ends with the DOI link."""
     row = {"pub_title": "Ants are the major agents.", "pub_authors": "[['Hannah M.', 'Griffiths']]",
            "publicationYear": None, "pub_date": "9/8/2017", "pub_publisher": "Wiley"}
     assert gcs.fallback_citation(row, "10.1111/1365-2656.12728") == (
@@ -82,21 +89,47 @@ def test_fallback_with_doi_and_date_only():
 
 
 def test_fallback_without_title_is_empty():
+    """Without a title there is no fallback citation."""
     row = {"pub_title": "not a doi", "pub_authors": "not a doi", "pub_publisher": "not a doi"}
     assert gcs.fallback_citation(row) == ""
 
 
 class FakeResponse:
+    """A minimal HTTP response: a status code and a body."""
+
     def __init__(self, status, text):
+        """Create the response.
+
+        Args:
+            status: The HTTP status code.
+            text: The body.
+        """
         self.status_code, self.text, self.encoding = status, text, None
 
 
 class FakeSession:
     """Answers like the formatter: a fixed body per DOI, else the error seen since Feb 2026."""
+
     def __init__(self, good):
+        """Create the session.
+
+        Args:
+            good: ``{doi: citation}`` for the DOIs the formatter can format.
+        """
         self.good, self.calls = good, []
 
     def get(self, url, headers=None, timeout=None):
+        """Answer a content-negotiation request, recording the DOI asked for.
+
+        Args:
+            url: The ``doi.org`` URL.
+            headers: Ignored.
+            timeout: Ignored.
+
+        Returns:
+            A 200 response with the DOI's citation, or with the "Unknown style"
+            error the formatter returned from February 2026.
+        """
         doi = url.split("doi.org/", 1)[1]
         self.calls.append(doi)
         if doi in self.good:
@@ -105,12 +138,32 @@ class FakeSession:
 
 
 def frame(rows):
+    """Citation rows from tuples, in the column order v3's tests used.
+
+    Args:
+        rows: Tuples of ``data_doi``, ``pub_doi``, ``pub_title``,
+            ``pub_authors``, ``publicationYear``, ``pub_date`` and
+            ``pub_publisher``.
+
+    Returns:
+        A list of row dicts.
+    """
     cols = ["data_doi", "pub_doi", "pub_title", "pub_authors", "publicationYear", "pub_date", "pub_publisher"]
     return [dict(zip(cols, r)) for r in rows]
 
 
 def run(rows, previous=None, **kwargs):
-    """format_citations with the v3 test's 'previous results' shape."""
+    """`citations.citation_text.format_citations` with the v3 tests' "previous results" shape.
+
+    Args:
+        rows: The citation rows.
+        previous: ``{publication DOI or URL: citation}`` from last week's
+            results, as the v3 tests gave it.
+        **kwargs: Passed on to ``format_citations``; ``pause`` defaults to 0.
+
+    Returns:
+        The citation strings only.
+    """
     reuse = {}
     for doi_value, text in (previous or {}).items():
         doi = gcs.normalise_doi(doi_value)
@@ -125,6 +178,7 @@ GOOD = "Griffiths, H. M., et al. (2017). Ants are the major agents of resource r
 
 
 def test_end_to_end(monkeypatch):
+    """Formatted, reused, fallback and empty citations in one run, each DOI looked up once and no error text in the output."""
     session = FakeSession({"10.1111/1365-2656.12728": GOOD})
     monkeypatch.setattr(gcs, "_session", lambda: session)
     df = frame([
@@ -148,6 +202,7 @@ def test_end_to_end(monkeypatch):
 
 
 def test_raises_when_formatter_is_broken(monkeypatch):
+    """When none of 25 lookups gives a citation, formatting raises rather than writing degraded strings."""
     monkeypatch.setattr(gcs, "_session", lambda: FakeSession({}))
     df = frame([("10.5285/d", f"10.1000/{i}", "T", "[]", "2020", "", "P") for i in range(25)])
     with pytest.raises(RuntimeError, match="0 of 25"):
@@ -156,14 +211,19 @@ def test_raises_when_formatter_is_broken(monkeypatch):
 
 def test_real_doi_org_apa_response_is_accepted():
     # Verbatim response from doi.org content negotiation, 2026-10-05.
+    """A verbatim APA citation from ``doi.org`` is accepted as a real citation."""
     assert gcs.is_real_citation(APA)
 
 
 def test_requests_apa_by_default(monkeypatch):
+    """Citations are requested as APA in British English by default, and the response is used as it is."""
     seen = {}
 
     class Session:
+        """A session that records the Accept header and answers with an APA citation."""
+
         def get(self, url, headers=None, timeout=None):
+            """Record the Accept header and return the APA citation."""
             seen["accept"] = headers["Accept"]
             return FakeResponse(200, APA)
 
@@ -175,8 +235,12 @@ def test_requests_apa_by_default(monkeypatch):
 
 
 def test_style_not_found_falls_back_even_with_http_200(monkeypatch):
+    """A "style not found" JSON error sent with HTTP 200 is not used; the citation falls back to the metadata."""
     class Session:
+        """A session that answers every request with the "style not found" error."""
+
         def get(self, url, headers=None, timeout=None):
+            """Return the "style not found" error with HTTP 200."""
             return FakeResponse(200, STYLE_NOT_FOUND)
 
     monkeypatch.setattr(gcs, "_session", lambda: Session())
@@ -209,14 +273,19 @@ def test_style_not_found_falls_back_even_with_http_200(monkeypatch):
     (None, ""),
 ])
 def test_plain_text(raw, expected):
+    """Markup, entities, sub- and superscripts and line breaks become plain text; text that only looks like a tag is kept."""
     assert gcs.plain_text(raw) == expected
 
 
 def test_every_output_is_plain_text(monkeypatch):
+    """Formatted, reused and fallback citations all come out as plain text."""
     marked_up = "Kamintzis, J., &amp; Hubbard, B. (2019). <i>Point cloud data\n of a channel</i>. NERC EDS."
 
     class Session:
+        """A session that answers every request with a marked-up citation."""
+
         def get(self, url, headers=None, timeout=None):
+            """Return the marked-up citation."""
             return FakeResponse(200, marked_up)
 
     monkeypatch.setattr(gcs, "_session", lambda: Session())
