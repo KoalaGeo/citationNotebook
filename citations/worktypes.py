@@ -44,6 +44,15 @@ _ALIASES = {
 
 
 def _key(value) -> str:
+    """A type name reduced for matching: lower case, letters only.
+
+    Args:
+        value: A type name from any source.
+
+    Returns:
+        For example ``"journalarticle"`` for ``"JournalArticle"``,
+        ``"journal-article"`` or ``"Journal Article"``.
+    """
     return re.sub(r"[^a-z]", "", str(value).lower())
 
 
@@ -53,7 +62,18 @@ _BROAD = {"text", "other"}
 
 
 def crossref_type(value, source: str | None = None) -> str | None:
-    """The Crossref type for a type name from `source`; None for no value."""
+    """The Crossref type for a type name from any source.
+
+    Args:
+        value: The type as the source gave it, for example ``"JournalArticle"``,
+            ``"article-journal"``, ``"publication"`` or ``"Working paper"``.
+        source: The source the name came from. Overton's document series are
+            mapped to ``report`` (or ``journal-article`` for a scholarly article).
+
+    Returns:
+        A value from `CROSSREF_TYPES`, ``other`` when none fits, or None
+        when `value` is empty.
+    """
     if value is None or not str(value).strip():
         return None
     key = _key(value)
@@ -67,7 +87,17 @@ def crossref_type(value, source: str | None = None) -> str | None:
 
 
 def datacite_type(types: dict | None) -> str | None:
-    """The Crossref type for a DataCite record's ``types``: resourceTypeGeneral first, else the CSL type."""
+    """The Crossref type for a DataCite record.
+
+    ``resourceTypeGeneral`` is used first; when it is too broad (``Text`` or
+    ``Other``) the CSL type in ``citeproc`` is used instead.
+
+    Args:
+        types: The record's ``attributes.types`` object, or None.
+
+    Returns:
+        A Crossref type, or None when the record gives no type.
+    """
     types = types or {}
     general = types.get("resourceTypeGeneral")
     if general and _key(general) not in _BROAD:

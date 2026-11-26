@@ -140,16 +140,39 @@ CREATE TABLE IF NOT EXISTS link_history (
 
 
 def now_iso() -> str:
+    """The current UTC time as an ISO 8601 string to the second.
+
+    Returns:
+        For example ``"2026-11-26T01:17:00Z"``. Every timestamp in the store is
+        written in this form.
+    """
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_iso(value: str | None) -> datetime | None:
+    """Parse a timestamp written by `now_iso`.
+
+    Args:
+        value: An ISO 8601 timestamp, with ``Z`` or an offset, or None.
+
+    Returns:
+        A timezone-aware datetime, or None when `value` is empty.
+    """
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def age_days(value: str | None, now: datetime | None = None) -> float | None:
+    """How many days ago a timestamp was.
+
+    Args:
+        value: An ISO 8601 timestamp, or None.
+        now: The time to measure from; the current UTC time when None.
+
+    Returns:
+        The age in days (fractional), or None when `value` is empty.
+    """
     then = parse_iso(value)
     if then is None:
         return None
@@ -158,6 +181,18 @@ def age_days(value: str | None, now: datetime | None = None) -> float | None:
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
+    """Open the store, creating the file, its folder and its tables if needed.
+
+    The connection returns rows as `sqlite3.Row`, so columns can be read
+    by name. Each harvest thread opens its own connection; a writer waits up to
+    60 seconds for another thread's transaction to finish.
+
+    Args:
+        path: The SQLite file, or ``":memory:"`` for a throwaway store.
+
+    Returns:
+        An open connection with the schema in place.
+    """
     path = Path(path)
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,7 +208,15 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 
 def _crossref_work_types(con):
-    """Once per store: map work types cached before they were normalised to Crossref's vocabulary."""
+    """Map cached work types to Crossref's vocabulary, once per store.
+
+    Stores written before work types were normalised hold each source's own type
+    names. This rewrites them with `citations.worktypes.crossref_type` and
+    records in ``meta`` that it has done so, so it never runs twice.
+
+    Args:
+        con: An open store connection.
+    """
     if con.execute("SELECT 1 FROM meta WHERE key='work_type_vocabulary' AND value='crossref'").fetchone():
         return
     from .worktypes import crossref_type
@@ -186,6 +229,21 @@ def _crossref_work_types(con):
 
 @contextmanager
 def transaction(con: sqlite3.Connection):
+    """Run a block as one transaction: commit at the end, roll back on any error.
+
+    Args:
+        con: An open store connection.
+
+    Yields:
+        The same connection.
+
+    Example:
+        ```python
+        with db.transaction(con):
+            db.set_good_run(con, source, run_id, rows)
+            db.prune_harvests(con, source, run_id)
+        ```
+    """
     try:
         yield con
         con.commit()
@@ -195,6 +253,16 @@ def transaction(con: sqlite3.Connection):
 
 
 def start_run(con, stage: str, source: str | None = None) -> int:
+    """Record the start of a stage (or one source's harvest) in ``runs``.
+
+    Args:
+        con: An open store connection.
+        stage: ``inventory``, ``harvest``, ``works``, ``merge`` or ``publish``.
+        source: For a harvest, the source being harvested.
+
+    Returns:
+        The new run's id.
+    """
     cur = con.execute(
         "INSERT INTO runs (stage, source, status, started_at, code_version) VALUES (?, ?, 'running', ?, ?)",
         (stage, source, now_iso(), CODE_VERSION),
@@ -204,6 +272,19 @@ def start_run(con, stage: str, source: str | None = None) -> int:
 
 
 def finish_run(con, run_id: int, status: str, rows=None, items=None, errors=None, message=None, details=None):
+    """Record how a run ended.
+
+    Args:
+        con: An open store connection.
+        run_id: The run, from `start_run`.
+        status: ``success``, ``partial``, ``failed``, ``rejected``, ``skipped``
+            or ``blocked``.
+        rows: Rows the run produced (links, datasets, works ...).
+        items: Requests or keys the run worked through.
+        errors: How many of those failed.
+        message: A short explanation, shown in ``status`` and the logs.
+        details: Anything else worth keeping, stored as JSON.
+    """
     con.execute(
         "UPDATE runs SET status=?, finished_at=?, rows=?, items=?, errors=?, message=?, details=? WHERE run_id=?",
         (status, now_iso(), rows, items, errors, message,
@@ -213,10 +294,29 @@ def finish_run(con, run_id: int, status: str, rows=None, items=None, errors=None
 
 
 def get_run(con, run_id: int):
+    """One run by id.
+
+    Args:
+        con: An open store connection.
+        run_id: The run to read.
+
+    Returns:
+        The ``runs`` row, or None if there is no such run.
+    """
     return con.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
 
 
 def latest_run(con, stage: str, source: str | None = None):
+    """The most recent run of a stage, whatever its status.
+
+    Args:
+        con: An open store connection.
+        stage: The stage name.
+        source: For a harvest, limit to this source.
+
+    Returns:
+        The ``runs`` row, or None if the stage has never run.
+    """
     if source is None:
         return con.execute("SELECT * FROM runs WHERE stage=? ORDER BY run_id DESC LIMIT 1", (stage,)).fetchone()
     return con.execute(
@@ -225,7 +325,17 @@ def latest_run(con, stage: str, source: str | None = None):
 
 
 def resumable_run(con, source: str, window_days: float):
-    """An unfinished (running or partial) harvest of `source` young enough to resume, else None."""
+    """An unfinished harvest of `source` young enough to resume.
+
+    Args:
+        con: An open store connection.
+        source: The harvest source.
+        window_days: The oldest a run may be, by its start time, to be resumed.
+
+    Returns:
+        The ``runs`` row of the latest harvest when it is still ``running``
+        (interrupted) or ``partial`` and started within `window_days`, else None.
+    """
     row = latest_run(con, "harvest", source)
     if row is None or row["status"] not in ("running", "partial"):
         return None
@@ -234,10 +344,28 @@ def resumable_run(con, source: str, window_days: float):
 
 
 def good_run(con, source: str):
+    """The run whose data is currently in use for a source.
+
+    Args:
+        con: An open store connection.
+        source: ``inventory`` or a harvest source.
+
+    Returns:
+        The ``source_state`` row (``good_run_id``, ``good_finished_at``,
+        ``rows``), or None if the source has never succeeded.
+    """
     return con.execute("SELECT * FROM source_state WHERE source=?", (source,)).fetchone()
 
 
 def set_good_run(con, source: str, run_id: int, rows: int | None):
+    """Point a source at a new good run. The caller commits.
+
+    Args:
+        con: An open store connection.
+        source: ``inventory`` or a harvest source.
+        run_id: The run that just succeeded.
+        rows: How many rows it produced, used by the next run's row-drop check.
+    """
     con.execute(
         "INSERT INTO source_state (source, good_run_id, good_finished_at, rows) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(source) DO UPDATE SET good_run_id=excluded.good_run_id, "
@@ -247,12 +375,27 @@ def set_good_run(con, source: str, run_id: int, rows: int | None):
 
 
 def prune_harvests(con, source: str, keep_run_id: int):
-    """Drop raw links and fetch logs of older runs of `source`, keeping the good run."""
+    """Drop the raw links and fetch logs of a source's older runs. The caller commits.
+
+    Args:
+        con: An open store connection.
+        source: The harvest source.
+        keep_run_id: The good run, whose data is kept.
+    """
     con.execute("DELETE FROM raw_links WHERE source=? AND run_id<>?", (source, keep_run_id))
     con.execute("DELETE FROM fetch_log WHERE source=? AND run_id<>?", (source, keep_run_id))
 
 
 def loads(value, default=None):
+    """Decode a JSON column.
+
+    Args:
+        value: The column's text, or None.
+        default: What to return for an empty column.
+
+    Returns:
+        The decoded value, or `default` when `value` is None or empty.
+    """
     if value in (None, ""):
         return default
     return json.loads(value)

@@ -15,6 +15,22 @@ from . import db
 
 
 def reconcile(con) -> tuple[list[dict], dict]:
+    """Compare the harvest with DataCite's ``citationCount``, dataset by dataset.
+
+    Only datasets that DataCite counts as cited, or that have a counted link
+    here, are compared.
+
+    Args:
+        con: An open store connection, after the merge stage.
+
+    Returns:
+        ``(rows, summary)``. Each row is one dataset, with the columns of
+        ``Results/v4/reconciliation.csv``; rows are sorted with the most missing
+        links first. The summary holds ``datacite_cited_datasets``,
+        ``datacite_citations``, ``datacite_links_harvested``,
+        ``incomplete_datasets``, ``incomplete_share`` (which the publishing guard
+        checks), ``pipeline_counted_citations`` and ``pipeline_cited_datasets``.
+    """
     datasets = {r["doi"]: r for r in con.execute("SELECT * FROM datasets")}
     good = db.good_run(con, "datacite")
     harvested = defaultdict(set)

@@ -5,6 +5,11 @@ wrote them as D/M/YYYY; it fetched nothing for citing works registered with
 DataCite, and repeated every lookup every week. Here each work is fetched once
 (refreshed after ``works_refresh_days``), dates are the ``issued`` date in ISO
 8601 with their precision, and DataCite-registered works get metadata too.
+
+Every work's metadata is a dict with the same keys, whichever function made
+it: ``title``, ``work_type`` (a Crossref type), ``container_title``,
+``publisher``, ``issued``, ``issued_precision``, ``authors`` (a list of
+``{given, family, name, orcid}``) and ``metadata_source``.
 """
 
 from __future__ import annotations
@@ -33,14 +38,33 @@ WORKS_BUCKETS = ("api.crossref.org/single", "api.datacite.org", "doi.org/crossre
 
 
 def _agency_bucket(work) -> str:
-    """The rate limit a DOI's citation string counts against: doi.org passes it to its registration agency."""
+    """The rate limit a DOI's citation string counts against.
+
+    ``doi.org`` passes a content-negotiation request on to the DOI's
+    registration agency, so the request counts against that agency's limit.
+
+    Args:
+        work: A ``works`` row.
+
+    Returns:
+        ``"doi.org/datacite"`` for a DataCite-registered DOI, else
+        ``"doi.org/crossref"``.
+    """
     if work["metadata_source"] in ("datacite", "inventory") or str(work["citing_id"]).startswith(DATACITE_PREFIXES):
         return "doi.org/datacite"
     return "doi.org/crossref"
 
 
 def _date(parts) -> tuple[str | None, str | None]:
-    """('2017-09-08', 'day') from Crossref date-parts [[2017, 9, 8]]."""
+    """An ISO date and its precision from Crossref ``date-parts``.
+
+    Args:
+        parts: Crossref date-parts, such as ``[[2017, 9, 8]]`` or ``[[2017]]``.
+
+    Returns:
+        ``("2017-09-08", "day")``, ``("2017-09", "month")`` or
+        ``("2017", "year")``; ``(None, None)`` when there is no date.
+    """
     try:
         values = [int(x) for x in (parts or [[]])[0] if x is not None]
     except (TypeError, ValueError):
@@ -52,7 +76,16 @@ def _date(parts) -> tuple[str | None, str | None]:
 
 
 def iso_date(value) -> tuple[str | None, str | None]:
-    """ISO date and precision from the many forms sources use ('2019', '2019-05', '2019-05-22T...', '22/5/2019')."""
+    """An ISO date and its precision from the many forms sources use.
+
+    Args:
+        value: ``"2019"``, ``"2019-05"``, ``"2019-05-22T10:00:00Z"`` or v3's
+            ``"22/5/2019"``.
+
+    Returns:
+        ``(date, precision)`` with precision ``year``, ``month`` or ``day``;
+        ``(None, None)`` when no date is recognised.
+    """
     if value is None:
         return None, None
     text = str(value).strip()
@@ -74,10 +107,29 @@ def iso_date(value) -> tuple[str | None, str | None]:
 
 
 def _orcid(value) -> str | None:
+    """The bare ORCID iD from an ORCID URL or iD.
+
+    Args:
+        value: ``"https://orcid.org/0000-0002-1825-0097"`` or the bare iD.
+
+    Returns:
+        The bare iD, or None when `value` is empty.
+    """
     return str(value).rstrip("/").split("/")[-1] if value else None
 
 
 def from_crossref(message: dict) -> dict:
+    """Work metadata from a Crossref record.
+
+    The date is the first of ``issued``, ``published-print``,
+    ``published-online``, ``published`` and ``created`` that is present.
+
+    Args:
+        message: The ``message`` of a Crossref ``/works/{doi}`` response.
+
+    Returns:
+        The work's metadata, with ``metadata_source`` ``crossref``.
+    """
     issued, precision = None, None
     for key in ("issued", "published-print", "published-online", "published", "created"):
         issued, precision = _date((message.get(key) or {}).get("date-parts"))
@@ -99,6 +151,16 @@ def from_crossref(message: dict) -> dict:
 
 
 def from_datacite(attributes: dict) -> dict:
+    """Work metadata from a DataCite record.
+
+    The date is the ``Issued`` date, else the publication year.
+
+    Args:
+        attributes: The record's ``attributes``.
+
+    Returns:
+        The work's metadata, with ``metadata_source`` ``datacite``.
+    """
     a = attributes or {}
     issued, precision = None, None
     for d in a.get("dates") or []:
@@ -131,6 +193,18 @@ def from_datacite(attributes: dict) -> dict:
 
 
 def from_hint(hint: dict, source: str) -> dict:
+    """Work metadata from what a source said about the work when it reported the link.
+
+    Used when the work has no DOI, or its DOI could not be looked up.
+
+    Args:
+        hint: A raw link's ``hint``: ``title``, ``work_type``, ``publisher``,
+            ``issued`` and ``authors``, any of them missing.
+        source: The source that gave the hint; also the ``metadata_source``.
+
+    Returns:
+        The work's metadata.
+    """
     issued, precision = iso_date(hint.get("issued"))
     return {
         "title": hint.get("title"),
@@ -145,6 +219,15 @@ def from_hint(hint: dict, source: str) -> dict:
 
 
 def from_inventory(row) -> dict:
+    """Work metadata for a citing work that is itself a NERC dataset.
+
+    Args:
+        row: The dataset's ``datasets`` row.
+
+    Returns:
+        The work's metadata, with ``work_type`` ``dataset`` and
+        ``metadata_source`` ``inventory``.
+    """
     year = row["publication_year"]
     return {
         "title": row["title"],
@@ -159,7 +242,21 @@ def from_inventory(row) -> dict:
 
 
 def fetch_doi(client, doi: str) -> dict | None:
-    """Metadata for a DOI from Crossref or DataCite; None if neither knows it."""
+    """Metadata for a DOI from Crossref or DataCite.
+
+    DOIs under a known DataCite prefix (`DATACITE_PREFIXES`) are looked up
+    at DataCite first; any other DOI at Crossref first.
+
+    Args:
+        client: The HTTP client.
+        doi: A bare lower-case DOI.
+
+    Returns:
+        The work's metadata, or None if neither agency knows the DOI.
+
+    Raises:
+        citations.http.HttpError: If a lookup fails other than with a 404.
+    """
     order = ("datacite", "crossref") if doi.startswith(DATACITE_PREFIXES) else ("crossref", "datacite")
     for agency in order:
         if agency == "crossref":
@@ -175,6 +272,14 @@ def fetch_doi(client, doi: str) -> dict | None:
 
 
 def _authors_for_citation(authors: list[dict]) -> list:
+    """Authors in the form `citations.citation_text.format_citations` reads.
+
+    Args:
+        authors: ``{given, family, name, orcid}`` dicts, or None.
+
+    Returns:
+        ``[given, family]`` pairs, or a name for an author with no family name.
+    """
     out = []
     for a in authors or []:
         if a.get("family"):
@@ -185,7 +290,15 @@ def _authors_for_citation(authors: list[dict]) -> list:
 
 
 def _previous_strings(settings) -> dict:
-    """Real citation strings already published in Results/v3, keyed by DOI (reused, not refetched)."""
+    """Real citation strings already published in ``Results/v3``, to reuse rather than fetch again.
+
+    Args:
+        settings: The run's settings, for the folder.
+
+    Returns:
+        ``{doi: citation}`` for every row whose ``PubCitationStr`` is a real
+        citation; empty if there is no earlier file.
+    """
     path = settings.v3_dir / "latest_results.csv"
     reuse = {}
     if not path.exists():
@@ -199,11 +312,42 @@ def _previous_strings(settings) -> dict:
 
 
 def _throttled(client) -> int:
+    """429 responses so far from the APIs the works stage calls.
+
+    Args:
+        client: The HTTP client.
+
+    Returns:
+        The total count of 429 responses in `WORKS_BUCKETS`.
+    """
     counts = client.throttled() if hasattr(client, "throttled") else {}
     return sum(n for bucket, n in counts.items() if bucket in WORKS_BUCKETS)
 
 
 def run_works(con, client, settings) -> str:
+    """Run the works stage: metadata and a citation string for every citing work.
+
+    Every citing work in a source's good run gets metadata, from the first that
+    applies: the inventory (a NERC dataset), Crossref or DataCite (a DOI), or the
+    best source hint (`HINT_PRIORITY`). Works fetched less than
+    ``works_refresh_days`` ago are skipped. Works are saved
+    `SAVE_EVERY` at a time, so a run stopped by the job's time limit keeps
+    what it fetched. A failed lookup is stored without ``fetched_at``, so the
+    next run tries it again.
+
+    Each work then gets a citation string once: a formatted citation reused
+    from earlier results or fetched by DOI content negotiation, else one built
+    from the metadata, else the work's link.
+
+    Args:
+        con: An open store connection.
+        client: The HTTP client.
+        settings: The run's settings.
+
+    Returns:
+        ``"success"``; ``"partial"`` when more than 20% of the DOI lookups
+        failed; or ``"failed"``.
+    """
     run_id = db.start_run(con, "works")
     throttled_before = _throttled(client)
     try:
@@ -245,6 +389,13 @@ def run_works(con, client, settings) -> str:
         retry = set()   # lookups that failed: stored without fetched_at, so the next run tries again
 
         def save(batch: dict):
+            """Insert or update a batch of works' metadata in one transaction.
+
+            A work's existing citation string is kept.
+
+            Args:
+                batch: ``{citing_id: metadata}``.
+            """
             now = db.now_iso()
             with db.transaction(con):
                 for citing_id, meta in batch.items():
@@ -288,6 +439,15 @@ def run_works(con, client, settings) -> str:
         # Citation strings for works that have none yet (every work ends up with at least a link,
         # so this happens once), or only a fallback or link made before metadata arrived.
         def citation_due(r):
+            """Whether a work needs a citation string made.
+
+            Args:
+                r: A ``works`` row.
+
+            Returns:
+                True when it has none, or has only a fallback or link made before its
+                metadata was just improved.
+            """
             if r["citation_text"]:
                 return r["citation_source"] in ("fallback", "link") and r["citing_id"] in rows  # metadata just improved
             return True

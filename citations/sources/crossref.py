@@ -30,6 +30,19 @@ RELATIONS = {
 
 
 def map_relation(raw: str | None) -> str | None:
+    """A Crossref data-citation relation, as it applies to the dataset.
+
+    Crossref states each relation with the article as subject and the dataset
+    as object.
+
+    Args:
+        raw: The relation as Crossref gave it, for example ``"references"`` or
+            ``"is_supplemented_by"``.
+
+    Returns:
+        The dataset-side relation in the DataCite vocabulary, or None when it is
+        unknown.
+    """
     if not raw:
         return None
     key = raw.strip().lower()
@@ -39,6 +52,22 @@ def map_relation(raw: str | None) -> str | None:
 
 
 def fetch_links(client, doi: str, mailto: str | None, tally: Tally) -> list[RawLink]:
+    """Every Crossref data citation of one dataset, following the cursor.
+
+    Args:
+        client: The HTTP client.
+        doi: The dataset's DOI.
+        mailto: Contact email for Crossref's polite pool, or None.
+        tally: Counts items with no identifier, unknown relations, and links
+            reported but not returned.
+
+    Returns:
+        The dataset's links, each with a hint of the work's type and
+        registration agency.
+
+    Raises:
+        citations.http.HttpError: If a page cannot be fetched.
+    """
     params = {"object-id": doi}
     if mailto:
         params["mailto"] = mailto
@@ -77,6 +106,15 @@ def fetch_links(client, doi: str, mailto: str | None, tally: Tally) -> list[RawL
 
 
 def harvest(ctx, run_id: int) -> dict:
+    """Harvest Crossref data citations for every dataset in the inventory.
+
+    Args:
+        ctx: The harvest context.
+        run_id: The harvest run.
+
+    Returns:
+        ``{"details": {...}}`` with the tally's counts.
+    """
     tally = Tally()
     dois = [row["doi"] for row in ctx.datasets()]
     per_key(ctx, SOURCE, run_id, dois, lambda doi: fetch_links(ctx.client, doi, ctx.settings.mailto, tally))

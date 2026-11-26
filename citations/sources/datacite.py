@@ -38,11 +38,30 @@ RELATED_TYPES = {"DOI": "doi", "URL": "url", "HANDLE": "handle", "PMID": "pmid"}
 
 
 def _event_doi(value):
+    """The DOI of an event's subject or object.
+
+    Args:
+        value: An event's ``subj-id`` or ``obj-id``, usually a ``doi.org`` URL.
+
+    Returns:
+        The bare lower-case DOI, or None when it is not a DOI.
+    """
     found = normalise_id(value)
     return found[0] if found and found[1] == "doi" else None
 
 
 def provenance_of(event_source: str | None) -> str:
+    """A raw link's provenance from the DataCite event source that stated it.
+
+    Args:
+        event_source: The event's ``source-id``, or None when no event labelled
+            the link.
+
+    Returns:
+        ``"datacite"`` when there is no event, ``"metadata"`` for DataCite's
+        copies of ``relatedIdentifiers``, else the event source itself (for
+        example ``"crossref"`` for Crossref reference lists).
+    """
     if not event_source:
         return "datacite"
     if event_source in METADATA_EVENT_SOURCES:
@@ -51,7 +70,24 @@ def provenance_of(event_source: str | None) -> str:
 
 
 def event_labels(client, doi: str) -> dict:
-    """{citing id: (dataset-side relation, raw relation, side, event source)} from the DOI's citation events."""
+    """How each citing work's link to a dataset is stated in the DataCite events.
+
+    Only event relation types DataCite counts as citations
+    (`CITATION_EVENT_TYPES`) are read. Where a work has several events, one
+    that reads as an incoming relation from the dataset's side wins.
+
+    Args:
+        client: The HTTP client.
+        doi: The dataset's DOI.
+
+    Returns:
+        ``{citing_id: (dataset_relation, raw_relation, side, event_source)}``,
+        where `side` is ``"subject"`` or ``"object"``: where the dataset sat in
+        the event.
+
+    Raises:
+        citations.http.HttpError: If a page of events cannot be fetched.
+    """
     labels, url, params = {}, EVENTS_URL, {"doi": doi, "page[size]": 1000}
     for _ in range(50):
         page = client.get_json(url, params=params, allow_404=False)
@@ -79,6 +115,25 @@ def event_labels(client, doi: str) -> dict:
 
 
 def fetch_cited(client, doi: str, tally: Tally) -> list[RawLink]:
+    """The links behind one dataset's DataCite ``citationCount``.
+
+    Reads ``relationships.citations`` from the dataset's record, then labels
+    each citing work from `event_labels`. A work DataCite counts but no
+    event states as incoming is kept as ``IsCitedBy``: DataCite's verdict is
+    kept, and what the event said is recorded in ``source_relation``.
+
+    Args:
+        client: The HTTP client.
+        doi: The dataset's DOI.
+        tally: Counts records not found, citation lists that differ from the
+            count, and links with no incoming label.
+
+    Returns:
+        The dataset's links; empty when DataCite has no record for it.
+
+    Raises:
+        citations.http.HttpError: If the record or events cannot be fetched.
+    """
     record = client.get_json(RECORD_URL.format(doi=quote(doi, safe="/")), allow_404=True)
     if record is None:
         tally.add("record_not_found")
@@ -114,7 +169,20 @@ def fetch_cited(client, doi: str, tally: Tally) -> list[RawLink]:
 
 
 def metadata_links(datasets, relations, tally: Tally) -> list[RawLink]:
-    """Incoming relations from the datasets' own relatedIdentifiers."""
+    """Incoming relations from the datasets' own ``relatedIdentifiers``.
+
+    These were downloaded with the inventory, so no requests are made.
+    Outgoing relations, unsupported identifier types and identifiers that
+    cannot be parsed are counted and skipped.
+
+    Args:
+        datasets: The inventory's ``datasets`` rows.
+        relations: The ``dataset_relations`` rows.
+        tally: Counts what was skipped and why.
+
+    Returns:
+        One link per usable incoming relation, with provenance ``metadata``.
+    """
     known = {row["doi"] for row in datasets}
     links = []
     for rel in relations:
@@ -138,6 +206,16 @@ def metadata_links(datasets, relations, tally: Tally) -> list[RawLink]:
 
 
 def harvest(ctx, run_id: int) -> dict:
+    """Harvest DataCite: dataset metadata relations, then the citations of every cited dataset.
+
+    Args:
+        ctx: The harvest context.
+        run_id: The harvest run.
+
+    Returns:
+        ``{"details": {...}}`` with ``cited_datasets``, ``metadata_links`` and
+        the tally's counts.
+    """
     con, client = ctx.con, ctx.client
     tally = Tally()
     datasets = ctx.datasets()

@@ -49,11 +49,24 @@ LEGACY_SOURCE = {"datacite": "datacite", "scholexplorer": "scholex", "overton": 
 
 
 class PublishBlocked(RuntimeError):
-    pass
+    """Publishing was refused by a guard.
+
+    Not raised at present: `run_publish` returns ``"blocked"`` instead.
+    """
 
 
 # -- writing ------------------------------------------------------------------
 def _atomic(path: Path, write, encoding: str = "utf-8"):
+    """Write a file atomically: to a temporary file in the same folder, then rename it.
+
+    A reader never sees a half-written file, and a failed write leaves the old
+    file in place.
+
+    Args:
+        path: The file to write; its folder is created if needed.
+        write: Called with the open text handle to write the contents.
+        encoding: The file's encoding.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
@@ -67,6 +80,15 @@ def _atomic(path: Path, write, encoding: str = "utf-8"):
 
 
 def _cell(value):
+    """A value as a v4 CSV cell.
+
+    Args:
+        value: Any value from a row.
+
+    Returns:
+        ``""`` for None, ``"true"`` or ``"false"`` for a bool, JSON for a list
+        or dict, else the value itself.
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -77,7 +99,22 @@ def _cell(value):
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict], cell=_cell, encoding: str = "utf-8"):
+    """Write rows to a CSV file atomically, with LF line endings.
+
+    Args:
+        path: The file to write.
+        columns: The header, and which keys of each row to write, in order.
+        rows: The rows; a missing key is written as an empty cell.
+        cell: Turns a value into a cell (`_cell` for v4,
+            `_v3_cell` for v3).
+        encoding: ``"utf-8"``, or ``"utf-8-sig"`` to start with a BOM.
+    """
     def write(handle):
+        """Write the header and rows to an open handle.
+
+        Args:
+            handle: The open file.
+        """
         writer = csv.writer(handle, lineterminator="\n")   # LF, as v3 wrote it; nothing for git to normalise
         writer.writerow(columns)
         for row in rows:
@@ -86,7 +123,22 @@ def write_csv(path: Path, columns: list[str], rows: list[dict], cell=_cell, enco
 
 
 def write_json(path: Path, data, lines: bool = False, compact: bool = False):
+    """Write data to a JSON file atomically.
+
+    Args:
+        path: The file to write.
+        data: The data.
+        lines: Write JSON Lines: one record of `data` per line.
+        compact: Write it on one line with no trailing newline, as v3 did.
+            Otherwise a list is written on one line and an object indented,
+            each followed by a newline.
+    """
     def write(handle):
+        """Write the data to an open handle.
+
+        Args:
+            handle: The open file.
+        """
         if lines:
             for record in data:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -103,11 +155,19 @@ V4_FILES = ("datasets.csv", "datasets.json", "links.csv", "links.jsonl", "works.
 
 
 def file_hashes(folder: Path, names=V4_FILES) -> dict:
-    """sha256 and size of each published file, recorded in the manifest.
+    """The SHA-256 and size of each published file, recorded in the manifest.
 
-    The files are fetched one by one (raw.githubusercontent.com caches each for a
-    few minutes), so a reader can be handed a new manifest with an old links.csv.
-    Checking the hashes tells it the set is consistent before it uses it.
+    The files are fetched one by one (``raw.githubusercontent.com`` caches each
+    for a few minutes), so a reader can be handed a new manifest with an old
+    ``links.csv``. Checking the hashes tells it the set is consistent before it
+    uses it.
+
+    Args:
+        folder: The folder holding the files.
+        names: The files to hash.
+
+    Returns:
+        ``{name: {"sha256": hex digest, "bytes": size}}``.
     """
     out = {}
     for name in names:
@@ -118,6 +178,14 @@ def file_hashes(folder: Path, names=V4_FILES) -> dict:
 
 # -- building rows ------------------------------------------------------------
 def _authors_names(authors: list[dict]) -> list[str]:
+    """Author names as v3 wrote them.
+
+    Args:
+        authors: ``{name, given, family, orcid}`` dicts, or None.
+
+    Returns:
+        Each author's ``name``, or ``"family, given"`` when there is no name.
+    """
     out = []
     for a in authors or []:
         if a.get("name"):
@@ -128,6 +196,17 @@ def _authors_names(authors: list[dict]) -> list[str]:
 
 
 def build(con) -> dict:
+    """Read everything to publish from the store, with each dataset's counts.
+
+    Args:
+        con: An open store connection, after the merge stage.
+
+    Returns:
+        ``{"datasets": [...], "links": [...], "works": [...]}``. JSON columns
+        are decoded; ``works`` holds only works some link uses; each dataset
+        gains ``data_centre_name``, ``counted_citations``, ``related_links``,
+        ``excluded_links`` and ``first_cited``.
+    """
     datasets = [dict(r) for r in con.execute("SELECT * FROM datasets ORDER BY doi")]
     links = [dict(r) for r in con.execute("SELECT * FROM links ORDER BY data_doi, citing_id")]
     used = {l["citing_id"] for l in links}
@@ -166,6 +245,21 @@ def build(con) -> dict:
 
 
 def v3_rows(data: dict) -> tuple[list[dict], list[dict]]:
+    """The v3 rows for the published links.
+
+    Counted links become ``latest_results`` rows and excluded links become
+    ``filtered_out_df`` rows; links that are included but not counted
+    (documentation, versions, dataset links ...) have no v3 row. Missing values
+    take v3's placeholders (`V3_NO_TITLE`, `V3_MISSING`) and
+    ``data_publication_year`` is a float, as the EDS citation API expects.
+
+    Args:
+        data: The output of `build`.
+
+    Returns:
+        ``(kept, filtered)``: rows with the `V3_COLUMNS` and
+        `V3_FILTERED_COLUMNS` keys.
+    """
     datasets = {d["doi"]: d for d in data["datasets"]}
     works = {w["citing_id"]: w for w in data["works"]}
     kept, filtered = [], []
@@ -222,12 +316,36 @@ def v3_rows(data: dict) -> tuple[list[dict], list[dict]]:
 
 def _v3_cell(value):
     # v3 consumers read list columns as Python list literals, as pandas wrote them.
+    """A value as a v3 CSV cell.
+
+    v3 consumers read list columns as Python list literals, as pandas wrote
+    them.
+
+    Args:
+        value: Any value from a v3 row.
+
+    Returns:
+        ``repr()`` of a list, ``""`` for None, else the value itself.
+    """
     if isinstance(value, list):
         return repr(value)
     return "" if value is None else value
 
 
 def write_v3(settings, data: dict):
+    """Write the v3-compatible files to ``Results/v3``.
+
+    ``latest_results.csv`` is written with a BOM (so Excel opens it correctly)
+    and ``filtered_out_df.csv`` without, as v3 wrote them. ``latest_results.json``
+    groups the rows by data-centre name and is written on one line.
+
+    Args:
+        settings: The run's settings, for the folder.
+        data: The output of `build`.
+
+    Returns:
+        ``(kept, filtered)``: how many rows each CSV holds.
+    """
     kept, filtered = v3_rows(data)
     # Encodings as v3 wrote them: latest_results.csv with a BOM (so Excel opens it correctly),
     # filtered_out_df.csv without. The JSON on one line.
@@ -242,6 +360,15 @@ def write_v3(settings, data: dict):
 
 # -- the stage ------------------------------------------------------------------
 def _previous_manifest(settings) -> dict | None:
+    """The manifest of the last published results.
+
+    Args:
+        settings: The run's settings, for the folder.
+
+    Returns:
+        The parsed ``Results/v4/manifest.json``, or None if it is missing or
+        unreadable.
+    """
     path = settings.v4_dir / "manifest.json"
     if not path.exists():
         return None
@@ -252,6 +379,16 @@ def _previous_manifest(settings) -> dict | None:
 
 
 def counts(data: dict, con) -> dict:
+    """The summary counts recorded in the manifest.
+
+    Args:
+        data: The output of `build`.
+        con: An open store connection, for the links by source.
+
+    Returns:
+        Datasets (in all, by centre and cited), links (in all, counted, by
+        class, by status and by source), exclusions by reason, and works.
+    """
     links = data["links"]
     return {
         "datasets": len(data["datasets"]),
@@ -268,6 +405,25 @@ def counts(data: dict, con) -> dict:
 
 
 def run_publish(con, settings, force: bool = False) -> str:
+    """Run the publish stage: check the guards, then write ``Results/v4`` and ``Results/v3``.
+
+    Every file is written atomically; ``manifest.json`` is written last, with
+    the hashes of the others.
+
+    Args:
+        con: An open store connection, after the merge stage.
+        settings: The run's settings.
+        force: Publish even when a guard reports a problem. The problems are
+            recorded in the manifest under ``guards``.
+
+    Returns:
+        ``"success"``, or ``"blocked"`` when a guard reported a problem and
+        `force` is False.
+
+    Raises:
+        Exception: Any error while writing is recorded in the run and raised
+            again.
+    """
     run_id = db.start_run(con, "publish")
     try:
         rec_rows, rec_summary = reconcile(con)
