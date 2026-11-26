@@ -1,4 +1,11 @@
-"""Running a source harvest: resume, error rate, row-drop check and the switch to the new good run."""
+"""Running a source harvest: resume, error rate, row-drop check and the switch to the new good run.
+
+Each source module (`citations.sources`) only knows how to fetch its own
+links. This module runs it: it starts or resumes a run, stores links as they
+arrive, and when the source is done decides the run's status. Only a
+``success`` becomes the source's new good run; anything else leaves the last
+good harvest in use.
+"""
 
 from __future__ import annotations
 
@@ -16,22 +23,43 @@ log = logging.getLogger(__name__)
 
 
 class SourceSkipped(Exception):
-    """The source cannot run in this environment (for example no API key); not a failure of the data."""
+    """The source cannot run in this environment; not a failure of the data.
+
+    A source raises it from its ``harvest`` function, for example when Overton
+    has no API key. The run is recorded as ``skipped``.
+    """
 
 
 class NoInventory(RuntimeError):
-    pass
+    """A harvest was asked for before any inventory had succeeded."""
 
 
 @dataclass
 class Context:
+    """What a source needs to harvest: the store, the HTTP client and the settings.
+
+    Attributes:
+        con: The store connection for this source's thread.
+        client: The shared HTTP client.
+        settings: The run's settings.
+    """
+
     con: object
     client: HttpClient
     settings: Settings
     _datasets: list | None = field(default=None, repr=False)
 
     def datasets(self) -> list:
-        """The current (last good) inventory, as sqlite rows."""
+        """The current inventory: every dataset of the last good inventory run.
+
+        Read once and kept.
+
+        Returns:
+            The ``datasets`` rows, ordered by DOI.
+
+        Raises:
+            NoInventory: If no inventory has succeeded yet.
+        """
         if self._datasets is None:
             if db.good_run(self.con, "inventory") is None:
                 raise NoInventory("No successful inventory yet: run `python -m citations inventory` first.")
@@ -39,13 +67,23 @@ class Context:
         return self._datasets
 
     def dataset_dois(self) -> set:
+        """The DOIs of the current inventory.
+
+        Returns:
+            A set of lower-case DOIs.
+        """
         return {row["doi"] for row in self.datasets()}
 
 
 class Tally:
-    """Thread-safe counters for what a source dropped or could not map."""
+    """Thread-safe counters for what a source dropped or could not map.
+
+    Sources count, for example, links to outgoing relations or identifiers they
+    could not normalise, and report the counts in the run's ``details``.
+    """
 
     def __init__(self):
+        """Start with every count at zero."""
         import threading
         from collections import Counter
 
@@ -53,16 +91,42 @@ class Tally:
         self.counts = Counter()
 
     def add(self, key: str, n: int = 1):
+        """Add to a count.
+
+        Args:
+            key: What is being counted.
+            n: How much to add.
+        """
         with self._lock:
             self.counts[key] += n
 
     def as_dict(self) -> dict:
+        """The counts so far.
+
+        Returns:
+            ``{key: count}``, sorted by key.
+        """
         with self._lock:
             return dict(sorted(self.counts.items()))
 
 
 @dataclass
 class RawLink:
+    """One link as a source reported it, before merging.
+
+    Attributes:
+        data_doi: The dataset's lower-case DOI.
+        citing_id: The citing work's normalised identifier.
+        citing_id_type: ``doi``, ``url``, ``pmid``, ``pmc`` or ``handle``.
+        relation_type: The relation from the dataset's side, in the DataCite
+            vocabulary.
+        source_relation: The relation exactly as the source reported it.
+        provenance: A finer origin within the source, such as a DataCite event
+            ``source-id``.
+        hint: What the source said about the citing work (title, type, date ...),
+            used when no better metadata can be fetched.
+    """
+
     data_doi: str
     citing_id: str
     citing_id_type: str
@@ -73,6 +137,14 @@ class RawLink:
 
 
 def write_links(con, source: str, run_id: int, links: list[RawLink]):
+    """Store a batch of a run's raw links. Duplicates are ignored. The caller commits.
+
+    Args:
+        con: An open store connection.
+        source: The harvest source.
+        run_id: The harvest run.
+        links: The links to store.
+    """
     con.executemany(
         "INSERT OR IGNORE INTO raw_links (source, run_id, data_doi, citing_id, citing_id_type, relation_type, "
         "source_relation, provenance, hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -85,6 +157,21 @@ def write_links(con, source: str, run_id: int, links: list[RawLink]):
 
 
 def log_fetch(con, source: str, run_id: int, key: str, status: str, n: int | None = None, message: str | None = None):
+    """Record the outcome of one request (or key) in a harvest. The caller commits.
+
+    The fetch log is what makes a harvest resumable: a key logged ``ok`` in a
+    run is not fetched again when that run resumes. Logging the same key again
+    replaces its entry.
+
+    Args:
+        con: An open store connection.
+        source: The harvest source.
+        run_id: The harvest run.
+        key: What was fetched, usually a dataset DOI.
+        status: ``ok`` or ``error``.
+        n: How many links it gave.
+        message: The error, with any API key hidden.
+    """
     con.execute(
         "INSERT INTO fetch_log (source, run_id, key, status, n, message, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(source, run_id, key) DO UPDATE SET status=excluded.status, n=excluded.n, "
@@ -94,6 +181,16 @@ def log_fetch(con, source: str, run_id: int, key: str, status: str, n: int | Non
 
 
 def done_keys(con, source: str, run_id: int) -> set:
+    """The keys already fetched successfully in a run.
+
+    Args:
+        con: An open store connection.
+        source: The harvest source.
+        run_id: The harvest run.
+
+    Returns:
+        The set of keys logged ``ok``.
+    """
     rows = con.execute("SELECT key FROM fetch_log WHERE source=? AND run_id=? AND status='ok'", (source, run_id))
     return {row["key"] for row in rows}
 
@@ -102,6 +199,14 @@ PROGRESS_SECONDS = 60   # how often each source logs its progress
 
 
 def _duration(seconds: float) -> str:
+    """A rough, readable duration for progress logs.
+
+    Args:
+        seconds: The duration.
+
+    Returns:
+        ``"under a minute"``, ``"about 12m"`` or ``"about 1h05m"``.
+    """
     if seconds < 60:
         return "under a minute"
     minutes = round(seconds / 60)
@@ -109,12 +214,23 @@ def _duration(seconds: float) -> str:
 
 
 def per_key(ctx: Context, source: str, run_id: int, keys, fetch_one):
-    """Fetch each key in worker threads and store its links as it arrives.
+    """Fetch each key in worker threads and store its links as they arrive.
 
-    fetch_one(key) -> list[RawLink]. Keys already fetched in this run are skipped,
-    which is what makes a harvest resumable. Each key is committed as it arrives:
-    the other sources are being harvested at the same time, so no source holds
-    the store's write lock while it waits on the network. Returns (items, errors).
+    Keys already fetched in this run are skipped, which is what makes a harvest
+    resumable. Each key is committed as it arrives: the other sources are being
+    harvested at the same time, so no source holds the store's write lock while
+    it waits on the network. Progress is logged every `PROGRESS_SECONDS`.
+
+    Args:
+        ctx: The harvest context.
+        source: The harvest source.
+        run_id: The harvest run.
+        keys: Everything to fetch, usually dataset DOIs.
+        fetch_one: Called with one key; returns that key's list of
+            `RawLink`. An exception is logged as that key's error.
+
+    Returns:
+        ``(items, errors)``: keys fetched in this call, and how many failed.
     """
     from .sources import MODULES
 
@@ -129,6 +245,11 @@ def per_key(ctx: Context, source: str, run_id: int, keys, fetch_one):
     throttled_at_start = _throttled(ctx.client, MODULES[source])
 
     def report(i):
+        """Log progress after `i` keys: rate, errors, 429s and time left.
+
+        Args:
+            i: Keys done so far.
+        """
         elapsed = time.monotonic() - started
         rate = i / elapsed if elapsed else 0.0
         left = f", {_duration((len(keys) - i) / rate)} left" if rate and i < len(keys) else ""
@@ -157,18 +278,45 @@ def per_key(ctx: Context, source: str, run_id: int, keys, fetch_one):
 
 
 def _throttled(client, module) -> int:
-    """429 responses so far from the APIs `module` calls (each source calls its own)."""
+    """429 responses so far from the APIs a source calls.
+
+    Args:
+        client: The HTTP client.
+        module: The source module; its ``BUCKETS`` names the rate-limit buckets
+            it uses.
+
+    Returns:
+        The total count of 429 responses in those buckets.
+    """
     counts = client.throttled() if hasattr(client, "throttled") else {}
     return sum(counts.get(bucket, 0) for bucket in getattr(module, "BUCKETS", ()))
 
 
 def run_harvests(settings: Settings, client: HttpClient, sources, resume: bool = True) -> dict:
-    """Harvest `sources` at the same time, one thread and one store connection each.
+    """Harvest several sources at the same time, one thread and one store connection each.
 
     Each source calls a different API with its own rate limit, so running them
-    together takes as long as the slowest instead of the sum. Returns {source: status}.
+    together takes as long as the slowest instead of the sum.
+
+    Args:
+        settings: The run's settings.
+        client: The shared HTTP client.
+        sources: Names of the sources to harvest.
+        resume: Whether an unfinished recent run is resumed rather than started
+            again.
+
+    Returns:
+        ``{source: status}``, as `run_harvest` returns it.
     """
     def one(source):
+        """Harvest one source on its own store connection.
+
+        Args:
+            source: The source to harvest.
+
+        Returns:
+            The run's status.
+        """
         con = db.connect(settings.db_path)
         try:
             return run_harvest(Context(con=con, client=client, settings=settings), source, resume=resume)
@@ -184,7 +332,32 @@ def run_harvests(settings: Settings, client: HttpClient, sources, resume: bool =
 
 
 def run_harvest(ctx: Context, source: str, resume: bool = True) -> str:
-    """Harvest one source; returns the run status."""
+    """Harvest one source and decide the run's status.
+
+    The run is:
+
+    - ``skipped`` when the source raised `SourceSkipped`;
+    - ``failed`` when it raised anything else;
+    - ``partial`` when more than ``max_error_rate`` of its requests failed (the
+      next run resumes and retries them);
+    - ``rejected`` when it found more than ``max_row_drop`` fewer links than the
+      last good harvest, unless the source is in ``accept_drop``;
+    - otherwise ``success``, which becomes the source's good run and prunes its
+      older runs.
+
+    Args:
+        ctx: The harvest context.
+        source: The source to harvest; one of
+            `citations.config.ALL_SOURCES`.
+        resume: Whether an unfinished recent run is resumed.
+
+    Returns:
+        The run's status.
+
+    Raises:
+        ValueError: If `source` is not a known source.
+        NoInventory: If no inventory has succeeded yet.
+    """
     from .sources import MODULES
 
     if source not in ALL_SOURCES:

@@ -23,6 +23,16 @@ log = logging.getLogger(__name__)
 
 
 def source_label(source: str, provenance: str) -> str:
+    """The label a raw link's source gets in a link's ``sources``.
+
+    Args:
+        source: The harvest source.
+        provenance: The raw link's finer origin within the source.
+
+    Returns:
+        ``datacite`` or ``datacite:<provenance>`` (for example
+        ``datacite:crossref``), ``crossref:datacitations``, or the source name.
+    """
     if source == "datacite":
         return f"datacite:{provenance}" if provenance not in ("datacite", "") else "datacite"
     if source == "crossref":
@@ -31,7 +41,19 @@ def source_label(source: str, provenance: str) -> str:
 
 
 def _seed_history(con, settings) -> int:
-    """First-seen dates for a fresh store: from the last published v4 links, else from v3's date_added."""
+    """First-seen dates for a fresh store, from earlier published results.
+
+    Reads ``Results/v4/links.csv`` if it exists, else the ``date_added`` column
+    of ``Results/v3/latest_results.csv``, so links keep the date they were first
+    found when the store is rebuilt.
+
+    Args:
+        con: An open store connection.
+        settings: The run's settings, for the results folders.
+
+    Returns:
+        How many links were seeded into ``link_history``.
+    """
     seeded = {}
     v4 = settings.v4_dir / "links.csv"
     v3 = settings.v3_dir / "latest_results.csv"
@@ -58,6 +80,26 @@ def _seed_history(con, settings) -> int:
 
 
 def run_merge(con, settings, today: str | None = None) -> str:
+    """Run the merge stage: one classified link per dataset and citing work.
+
+    Takes every raw link from each source's good run, drops those whose dataset
+    is no longer in the inventory, and groups the rest by ``(data_doi,
+    citing_id)``. For each pair the highest-priority relation wins
+    (`citations.relations.PRIORITY`); a link to another NERC dataset is
+    classed ``dataset-link``; the exclusion rules are applied; and ``counted``
+    is set for included ``citation`` and ``supplement`` links. ``first_seen``
+    comes from ``link_history``. The ``links`` table is replaced in one
+    transaction.
+
+    Args:
+        con: An open store connection.
+        settings: The run's settings.
+        today: The date recorded as ``last_seen`` (and ``first_seen`` for new
+            links), ``YYYY-MM-DD``; today when None.
+
+    Returns:
+        ``"success"`` or ``"failed"``.
+    """
     run_id = db.start_run(con, "merge")
     today = today or date.today().isoformat()
     try:

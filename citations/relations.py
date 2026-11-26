@@ -83,7 +83,16 @@ USE_CLASSES = {"citation", "supplement", "documentation", "other"}
 
 
 def canonical(relation: str | None) -> str | None:
-    """'is-referenced-by', 'isreferencedby', 'IsReferencedBy' -> 'IsReferencedBy'; unknown -> None."""
+    """A relation name in the DataCite vocabulary, however it was spelled.
+
+    Args:
+        relation: A relation such as ``"is-referenced-by"``, ``"isreferencedby"``
+            or ``"IsReferencedBy"``.
+
+    Returns:
+        The DataCite CamelCase name (``"IsReferencedBy"``), or None when the
+        relation is empty or unknown.
+    """
     if not relation:
         return None
     key = re.sub(r"[^a-z]", "", str(relation).lower())
@@ -91,10 +100,22 @@ def canonical(relation: str | None) -> str | None:
 
 
 def dataset_side(relation: str | None, dataset_is: str) -> str | None:
-    """The relation from the dataset's side.
+    """A relation as it applies to the dataset.
 
-    `relation` is stated subject -> object. If the dataset is the subject it is
-    already dataset-side; if the dataset is the object it is inverted.
+    Every relation is stated subject to object. If the dataset is the subject the
+    relation is already dataset-side; if it is the object, the relation is
+    inverted (``Cites`` becomes ``IsCitedBy``).
+
+    Args:
+        relation: The relation as the source stated it, in any spelling.
+        dataset_is: ``"subject"`` or ``"object"``: where the dataset sits.
+
+    Returns:
+        The dataset-side relation in the DataCite vocabulary, or None when the
+        relation is unknown.
+
+    Raises:
+        ValueError: If `dataset_is` is neither ``"subject"`` nor ``"object"``.
     """
     name = canonical(relation)
     if name is None:
@@ -107,16 +128,40 @@ def dataset_side(relation: str | None, dataset_is: str) -> str | None:
 
 
 def relation_class(dataset_relation: str | None) -> str | None:
-    """Class of a dataset-side relation, or None when the relation is outgoing."""
+    """The class of a dataset-side relation.
+
+    Args:
+        dataset_relation: A relation from `dataset_side`.
+
+    Returns:
+        ``citation``, ``supplement``, ``documentation``, ``other``,
+        ``version-or-part`` or ``similarity``; or None when the relation is
+        outgoing (the dataset cites or derives from the other work).
+    """
     if dataset_relation is None:
         return None
     return CLASS_OF.get(dataset_relation)
 
 
 def is_incoming(dataset_relation: str | None) -> bool:
+    """Whether a dataset-side relation is a link *to* the dataset.
+
+    Args:
+        dataset_relation: A relation from `dataset_side`.
+
+    Returns:
+        True when the relation has a class; False when it is outgoing or unknown.
+    """
     return relation_class(dataset_relation) is not None
 
 
 def to_kebab(name: str) -> str:
-    """'IsReferencedBy' -> 'is-referenced-by' (the DataCite events spelling)."""
+    """A DataCite relation name in the DataCite events API's spelling.
+
+    Args:
+        name: A CamelCase relation, such as ``"IsReferencedBy"``.
+
+    Returns:
+        The kebab-case form, such as ``"is-referenced-by"``.
+    """
     return re.sub(r"(?<!^)(?=[A-Z])", "-", name).lower()

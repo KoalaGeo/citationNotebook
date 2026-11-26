@@ -34,13 +34,33 @@ log = logging.getLogger("citations")
 
 
 def _annotate(level: str, message: str):
-    """GitHub Actions annotation, so failures show on the run summary."""
+    """Print a GitHub Actions annotation, so a failure shows on the run's summary page.
+
+    Does nothing outside GitHub Actions.
+
+    Args:
+        level: ``"error"``, ``"warning"`` or ``"notice"``.
+        message: The annotation text.
+    """
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::{level}::{message}", flush=True)
 
 
 def _common(suppress: bool) -> argparse.ArgumentParser:
-    """Options accepted before or after the command (`citations --db x status` or `citations status --db x`)."""
+    """The options every command accepts, before or after the command name.
+
+    Both ``citations --db x status`` and ``citations status --db x`` work: the
+    options are added to the main parser with their defaults, and to each
+    subcommand with suppressed defaults, so a value given after the command
+    overrides one given before it without resetting it.
+
+    Args:
+        suppress: Whether to suppress the defaults (for the subcommands).
+
+    Returns:
+        A parent parser holding ``--db``, ``--results``, ``--workers``,
+        ``--mailto`` and ``--verbose``.
+    """
     common = argparse.ArgumentParser(add_help=False)
     default = (lambda value: argparse.SUPPRESS) if suppress else (lambda value: value)
     common.add_argument("--db", type=Path, default=default(Path(os.environ.get("CITATIONS_DB", "data/citations.sqlite"))),
@@ -57,18 +77,44 @@ def _common(suppress: bool) -> argparse.ArgumentParser:
 def _source(value: str) -> str:
     # Checked here rather than with choices=: before Python 3.12 argparse also checks the
     # empty default of an nargs="*" positional against choices, so `harvest` alone failed.
+    """Check a source name given to ``harvest``.
+
+    This is checked here rather than with ``choices=``: before Python 3.12
+    argparse also checks the empty default of an ``nargs="*"`` positional
+    against ``choices``, so ``harvest`` with no sources failed.
+
+    Args:
+        value: The name as typed.
+
+    Returns:
+        The name, unchanged.
+
+    Raises:
+        argparse.ArgumentTypeError: If it is not one of
+            `citations.config.ALL_SOURCES`.
+    """
     if value not in ALL_SOURCES:
         raise argparse.ArgumentTypeError(f"invalid choice: {value!r} (choose from {', '.join(ALL_SOURCES)})")
     return value
 
 
 def _accept_drop(parser: argparse.ArgumentParser):
+    """Add the ``--accept-drop SOURCE ...`` option to a subcommand.
+
+    Args:
+        parser: The subcommand's parser.
+    """
     parser.add_argument("--accept-drop", nargs="+", default=[], choices=ALL_SOURCES, metavar="SOURCE",
                         help="accept a drop of more than 20%% in these sources' links (when it is real): "
                              "the harvest is not rejected and publishing is not blocked for it")
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """The command-line parser, with every subcommand and its options.
+
+    Returns:
+        The parser. Its help text is this module's docstring.
+    """
     parser = argparse.ArgumentParser(prog="citations", description=__doc__, parents=[_common(False)],
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -105,6 +151,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _status(con) -> int:
+    """Print the latest run of every stage and source, then each source's good run.
+
+    Args:
+        con: An open store connection.
+
+    Returns:
+        The exit code, always 0.
+    """
     rows = con.execute(
         "SELECT r.* FROM runs r JOIN (SELECT stage, COALESCE(source, '') AS s, MAX(run_id) AS m FROM runs "
         "GROUP BY stage, COALESCE(source, '')) x ON r.run_id = x.m ORDER BY r.run_id").fetchall()
@@ -120,6 +174,17 @@ def _status(con) -> int:
 
 
 def main(argv=None) -> int:
+    """Run a command and return its exit code.
+
+    Args:
+        argv: The arguments, without the program name; ``sys.argv[1:]`` when
+            None.
+
+    Returns:
+        0 on success; 1 when a stage failed; 2 when publishing was blocked by a
+        guard. ``all`` returns 0 when it published, even if an optional stage
+        failed (a warning annotation says which).
+    """
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")

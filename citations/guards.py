@@ -14,6 +14,18 @@ from .config import ALL_SOURCES, OPTIONAL_SOURCES, REQUIRED_SOURCES
 
 
 def source_report(con, settings) -> dict:
+    """The state of the inventory and each source, as the guards and the manifest see it.
+
+    Args:
+        con: An open store connection.
+        settings: The run's settings; ``max_source_age_days`` decides staleness.
+
+    Returns:
+        ``{source: info}`` for ``inventory`` and every harvest source. Each info
+        dict holds ``required``, the latest run's ``latest_status``,
+        ``latest_run_id`` and ``latest_message``, the good run's ``good_run_id``,
+        ``good_finished_at`` and ``good_rows``, its ``age_days``, and ``stale``.
+    """
     report = {}
     for source in ("inventory",) + ALL_SOURCES:
         stage = "inventory" if source == "inventory" else "harvest"
@@ -35,6 +47,16 @@ def source_report(con, settings) -> dict:
 
 
 def links_by_source(con) -> dict:
+    """How many merged links each source contributed to.
+
+    A link found by two sources counts once for each.
+
+    Args:
+        con: An open store connection.
+
+    Returns:
+        ``{source: links}``, sorted by source.
+    """
     counts = Counter()
     for row in con.execute("SELECT sources FROM links"):
         for label in json.loads(row["sources"]):
@@ -43,7 +65,32 @@ def links_by_source(con) -> dict:
 
 
 def check(con, settings, previous_manifest: dict | None, reconciliation: dict | None) -> tuple[list, list, dict]:
-    """(problems, warnings, report). Any problem blocks publishing unless forced."""
+    """Decide whether the results are fit to publish.
+
+    Problems block publishing unless it is forced; warnings are recorded in the
+    manifest and the logs. A problem is any of:
+
+    - the inventory or a required source has no good harvest, its latest run
+      failed, or its good harvest is stale;
+    - the works or merge stage did not succeed;
+    - a required source has lost more than ``max_row_drop`` of its links
+      against the last published results, and the drop was not accepted;
+    - more DataCite-cited datasets than ``reconcile_threshold`` have fewer
+      harvested DataCite links than their ``citationCount``.
+
+    The same conditions on an optional source are only warnings.
+
+    Args:
+        con: An open store connection.
+        settings: The run's settings, which hold the thresholds.
+        previous_manifest: The last published ``manifest.json``, or None.
+        reconciliation: The output of `citations.reconcile.reconcile`,
+            or None.
+
+    Returns:
+        ``(problems, warnings, report)``: two lists of messages, and the
+        `source_report`.
+    """
     problems, warnings = [], []
     report = source_report(con, settings)
     for source, info in report.items():

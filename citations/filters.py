@@ -18,6 +18,14 @@ EGU_ABSTRACT_PREFIX = "10.5194/egusphere-egu"
 
 
 def _year(value) -> int | None:
+    """The year at the start of a date.
+
+    Args:
+        value: A year or an ISO date (``2021``, ``"2021-03"``, ``"2021-03-04"``).
+
+    Returns:
+        The year as an int, or None when there is no year.
+    """
     try:
         return int(str(value)[:4])
     except (TypeError, ValueError):
@@ -26,7 +34,31 @@ def _year(value) -> int | None:
 
 def exclusion_reason(data_doi: str, citing_id: str, relation_class: str, work: dict | None,
                      dataset_year, tolerance_years: int = 2, use_classes=None) -> str | None:
-    """The first rule the link breaks, or None if it is included."""
+    """The first exclusion rule a link breaks.
+
+    The rules, in order: the work is the dataset itself (``self-link``); the work
+    is a comment or reply (``comment``); it is a peer review (``peer-review``);
+    it is an EGU General Assembly abstract (``conference-abstract``); it is a
+    GBIF download (``gbif-download``); or, for a link that says the work used the
+    dataset, the work was published `tolerance_years` or more before the dataset
+    (``predates-data``).
+
+    Args:
+        data_doi: The dataset's DOI.
+        citing_id: The citing work's normalised identifier.
+        relation_class: The link's class, from
+            `citations.relations.relation_class`.
+        work: The citing work's metadata (``title``, ``work_type``, ``issued``),
+            or None when it is unknown.
+        dataset_year: The dataset's publication year.
+        tolerance_years: The gap, in years, at which a work counts as published
+            before the dataset it uses.
+        use_classes: Classes the ``predates-data`` rule applies to; defaults to
+            `citations.relations.USE_CLASSES`.
+
+    Returns:
+        One of `REASONS`, or None when the link is included.
+    """
     from .relations import USE_CLASSES
 
     use_classes = USE_CLASSES if use_classes is None else use_classes

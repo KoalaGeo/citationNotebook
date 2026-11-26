@@ -24,7 +24,17 @@ SCHEME_PREFERENCE = ("doi", "pmid", "pmc", "handle", "url")
 
 
 def best_identifier(identifiers, exclude: str):
-    """(id, type) of the citing work: a DOI if it has one, else PMID, PMC, handle or URL."""
+    """The identifier of a citing work, from the identifiers Scholexplorer lists for it.
+
+    Args:
+        identifiers: The Scholix ``Identifier`` list (``ID``, ``IDScheme``,
+            ``IDURL``).
+        exclude: The dataset's DOI, which is never the citing work.
+
+    Returns:
+        ``(identifier, type)``: a DOI if it has one, else a PMID, PMC, handle or
+        URL; None when nothing usable is listed.
+    """
     ids = [i for i in identifiers or [] if isinstance(i, dict)]
     for scheme in SCHEME_PREFERENCE:
         for ident in ids:
@@ -40,6 +50,15 @@ def best_identifier(identifiers, exclude: str):
 
 
 def _hint(source: dict) -> dict:
+    """What Scholexplorer says about the citing work, kept as its metadata hint.
+
+    Args:
+        source: The Scholix link's ``source`` object.
+
+    Returns:
+        ``title``, ``issued``, ``work_type``, ``publisher`` and ``authors``, with
+        empty keys left out.
+    """
     publishers = source.get("Publisher") or []
     hint = {
         "title": source.get("Title"),
@@ -52,6 +71,17 @@ def _hint(source: dict) -> dict:
 
 
 def parse_link(link: dict, doi: str, tally: Tally) -> RawLink | None:
+    """One Scholix link as a raw link.
+
+    Args:
+        link: One item of a Scholexplorer ``result`` list.
+        doi: The dataset's DOI (the link's target).
+        tally: Counts unknown relations, outgoing relations and links with no
+            usable identifier.
+
+    Returns:
+        The raw link, or None when it is skipped.
+    """
     rel = link.get("RelationshipType") or {}
     name, subtype = rel.get("Name") or "", rel.get("SubType") or ""
     raw = "/".join(x for x in (name, subtype) if x)
@@ -71,6 +101,19 @@ def parse_link(link: dict, doi: str, tally: Tally) -> RawLink | None:
 
 
 def fetch_links(client, doi: str, tally: Tally) -> list[RawLink]:
+    """Every Scholexplorer link to one dataset, page by page.
+
+    Args:
+        client: The HTTP client.
+        doi: The dataset's DOI.
+        tally: Counts what was skipped and why.
+
+    Returns:
+        The dataset's links.
+
+    Raises:
+        citations.http.HttpError: If a page cannot be fetched.
+    """
     links, page, total_pages = [], 0, 1
     while page < total_pages and page < 1000:
         payload = client.get_json(LINKS_URL, params={"targetPid": doi, "page": page, "size": PAGE_SIZE},
@@ -88,6 +131,15 @@ def fetch_links(client, doi: str, tally: Tally) -> list[RawLink]:
 
 
 def harvest(ctx, run_id: int) -> dict:
+    """Harvest Scholexplorer for every dataset in the inventory.
+
+    Args:
+        ctx: The harvest context.
+        run_id: The harvest run.
+
+    Returns:
+        ``{"details": {...}}`` with the tally's counts.
+    """
     tally = Tally()
     dois = [row["doi"] for row in ctx.datasets()]
     per_key(ctx, SOURCE, run_id, dois, lambda doi: fetch_links(ctx.client, doi, tally))

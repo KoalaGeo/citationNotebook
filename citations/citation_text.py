@@ -76,6 +76,18 @@ _SUB_MAP = str.maketrans(_SUB_CHARS, "₀₁₂₃₄₅₆₇₈₉₊₋₋₌
 
 
 def _script(match):
+    """Replace one ``<sup>`` or ``<sub>`` element with plain text.
+
+    Uses Unicode superscript or subscript characters where they exist (N₂O,
+    ¹³⁷Cs, m²), else the plain characters, and decides which side the script
+    attaches to.
+
+    Args:
+        match: A match of `_SUP_SUB`.
+
+    Returns:
+        The replacement text.
+    """
     before, kind, inner, after, following = match.groups()
     kind, inner = kind.lower(), re.sub(r"\s+", "", inner)
     table, allowed = (_SUP_MAP, _SUP_CHARS) if kind == "sup" else (_SUB_MAP, _SUB_CHARS)
@@ -92,13 +104,19 @@ def _script(match):
 
 
 def _fix_entity_case(match):
-    """Undo title-casing of an entity name without touching real capitals.
+    """Undo title-casing of an HTML entity name without touching real capitals.
 
-    Title-casing turns "&amp;" into "&Amp;" (not an entity, so html.unescape
-    leaves it alone) and "caf&eacute;" into "caf&Eacute;" (a valid entity, but
-    the wrong letter). Lowercase the name when it isn't a valid entity, or when
-    it sits mid-word after a lowercase letter. "&Aacute;lvarez" and
-    "&Ouml;sterreich" keep their capitals.
+    Title-casing turns ``&amp;`` into ``&Amp;`` (not an entity, so
+    `html.unescape` leaves it alone) and ``caf&eacute;`` into
+    ``caf&Eacute;`` (a valid entity, but the wrong letter). The name is lowered
+    when it isn't a valid entity, or when it sits mid-word after a lowercase
+    letter; ``&Aacute;lvarez`` and ``&Ouml;sterreich`` keep their capitals.
+
+    Args:
+        match: A match of ``&name;``.
+
+    Returns:
+        The entity, with its name lowered where needed.
     """
     name = match.group(1)
     previous = match.string[match.start() - 1:match.start()]
@@ -108,12 +126,31 @@ def _fix_entity_case(match):
 
 
 def _missing(value):
+    """Whether a value is missing: None or NaN.
+
+    Args:
+        value: Any value.
+
+    Returns:
+        True for None or a float NaN.
+    """
     return value is None or (isinstance(value, float) and value != value)
 
 
 def plain_text(value):
-    """Citation or title as clean plain text: entities decoded, inline markup
-    removed, whitespace (including line breaks) collapsed to single spaces."""
+    """A citation or title as clean plain text.
+
+    HTML entities are decoded (twice, for double-escaped text), inline markup
+    (``<i>``, ``<scp>``, MathML ...) is removed, ``<sub>`` and ``<sup>`` become
+    Unicode where possible, and whitespace, line breaks included, collapses to
+    single spaces.
+
+    Args:
+        value: The text, or None or NaN.
+
+    Returns:
+        The plain text; ``""`` for a missing value.
+    """
     if _missing(value):
         return ""
     text = str(value)
@@ -131,7 +168,14 @@ def plain_text(value):
 
 
 def _clean(value):
-    """Text value, or '' for missing values and harvester placeholders."""
+    """A value as stripped text, or ``""`` for missing values and harvester placeholders.
+
+    Args:
+        value: Any value.
+
+    Returns:
+        The text, or ``""``.
+    """
     if _missing(value):
         return ""
     text = str(value).strip()
@@ -139,18 +183,44 @@ def _clean(value):
 
 
 def normalise_doi(value, data_doi=None):
-    """The DOI in `value` (original case), or None; None too when it is `data_doi` itself."""
+    """The DOI in a value, with its original case.
+
+    Args:
+        value: Text that may hold a DOI.
+        data_doi: The cited dataset's DOI, which is never returned.
+
+    Returns:
+        The DOI, or None when there is none or it is `data_doi`.
+    """
     return extract_doi(value, exclude=data_doi)
 
 
 def is_real_citation(text):
-    """True for a usable citation string, False for errors and placeholders."""
+    """Whether a string is a usable citation rather than an error or a placeholder.
+
+    Args:
+        text: A citation string as a formatter returned it, or None.
+
+    Returns:
+        True when it is at least 20 characters and matches none of the
+        formatter error messages in `FORMATTER_ERRORS`.
+    """
     cleaned = _clean(text)
     return bool(cleaned) and len(cleaned) >= 20 and not FORMATTER_ERRORS.search(cleaned)
 
 
 def _authors(value, limit=3):
-    """'Family A., Family B., Family C., et al.' from the varied author formats."""
+    """Authors as a short citation list from the varied author formats.
+
+    Args:
+        value: A list of ``[given, family]`` pairs or names, or its Python
+            literal text, as v3 wrote it.
+        limit: How many authors to name before ``et al.``.
+
+    Returns:
+        For example ``"Smith J.A., Jones B., Natural History Museum, et al."``;
+        the text itself when it is not a list; ``""`` when empty.
+    """
     text = _clean(value)
     if not text:
         return ""
@@ -177,6 +247,15 @@ def _authors(value, limit=3):
 
 
 def _year(row):
+    """A row's publication year.
+
+    Args:
+        row: A citation row.
+
+    Returns:
+        The four-digit year from ``publicationYear``, else the first plausible
+        year in ``pub_date``, else ``""``.
+    """
     year = _clean(row.get("publicationYear"))
     if re.fullmatch(r"\d{4}(\.0)?", year):
         return year[:4]
@@ -185,7 +264,21 @@ def _year(row):
 
 
 def fallback_citation(row, doi=None):
-    """A plain citation from the row's metadata: Authors (Year). Title. Publisher. DOI."""
+    """A plain citation built from a row's metadata.
+
+    The form is ``Authors (Year). Title. Publisher. https://doi.org/DOI``, with
+    missing parts left out and a publisher that repeats the title or an
+    organisational author skipped.
+
+    Args:
+        row: A citation row (``pub_authors``, ``publicationYear``, ``pub_date``,
+            ``pub_title``, ``pub_publisher``).
+        doi: The work's DOI, if it has one.
+
+    Returns:
+        The citation, or ``""`` when there is no title: without one the string
+        isn't worth showing.
+    """
     authors = _authors(row.get("pub_authors"))
     year = _year(row)
     title = _clean(row.get("pub_title")).rstrip(".")
@@ -209,6 +302,11 @@ def fallback_citation(row, doi=None):
 
 
 def _session():
+    """A `requests.Session` with retries, for when no rate limiter is given.
+
+    Returns:
+        The session.
+    """
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -222,9 +320,20 @@ def _session():
 
 
 def fetch_formatted(session, doi, style, locale, timeout=15, observe=None):
-    """Formatted citation for `doi`, or None if the formatter didn't give one.
+    """A formatted citation for a DOI, by DOI content negotiation.
 
-    observe(response), if given, sees every response (the caller counts 429s with it).
+    Args:
+        session: The session to request with.
+        doi: The DOI.
+        style: A CSL style name, such as ``"apa"``.
+        locale: A CSL locale, such as ``"en-GB"``.
+        timeout: The request timeout in seconds.
+        observe: Called with every response, if given (the caller counts 429s
+            with it).
+
+    Returns:
+        The citation, or None if the request failed or the formatter gave no
+        real citation.
     """
     try:
         response = session.get(
@@ -259,23 +368,39 @@ def format_citations(
     workers=1,
     limiter=None,
 ):
-    """A plain-text citation string for each row (dicts with the v3 keys).
+    """A plain-text citation string for each row.
 
-    rows: dicts with data_doi, pub_doi, pub_title, pub_authors, publicationYear,
-        pub_date and pub_publisher.
-    reuse: optional {doi (lower case): citation string}; real citations in it are
-        used instead of being fetched again.
-    min_success_rate: if fewer than this share of the DOIs looked up get a
-        formatted citation (and at least 20 were tried), raise RuntimeError
-        instead of returning degraded strings. None disables the check.
+    Each DOI not in `reuse` is looked up once, `workers` at a time. A row with
+    no DOI, or whose lookup failed, gets `fallback_citation`.
 
-    workers: DOIs fetched at once. limiter: optional, such as the HttpClient, with
-    limited(bucket), a context manager that waits for a turn in the rate limit named
-    by the row's "bucket" key and is held while the request runs (pause is then not
-    used), and observe(bucket, response), which counts 429s.
+    Args:
+        rows: Dicts with ``data_doi``, ``pub_doi``, ``pub_title``,
+            ``pub_authors``, ``publicationYear``, ``pub_date`` and
+            ``pub_publisher``, and optionally ``bucket`` (the rate-limit bucket
+            for `limiter`).
+        reuse: ``{doi: citation}``; real citations in it are used instead of
+            being fetched again.
+        style: The CSL style.
+        locale: The CSL locale.
+        min_success_rate: If fewer than this share of the DOIs looked up get a
+            formatted citation (and at least 20 were tried), raise instead of
+            returning degraded strings. None disables the check.
+        pause: Seconds to wait after each lookup when there is no `limiter`.
+        session: A session to use for every lookup; one per thread when None.
+        workers: DOIs fetched at once.
+        limiter: Something like `citations.http.HttpClient`, with
+            ``limited(bucket)`` (a context manager that waits for a turn in that
+            rate limit and is held while the request runs) and
+            ``observe(bucket, response)`` (which counts 429s).
 
-    Returns (strings, sources, stats): sources says per row whether the string
-    was "reused", "formatter" or "fallback" ("" when there is none).
+    Returns:
+        ``(strings, sources, stats)``. `sources` says for each row whether its
+        string was ``"reused"``, ``"formatter"`` or ``"fallback"`` (``""`` when
+        there is none). `stats` counts ``formatted``, ``reused``, ``fallback``,
+        ``empty``, ``tried`` and ``succeeded``.
+
+    Raises:
+        RuntimeError: If too few lookups succeeded (see `min_success_rate`).
     """
     reuse = {k.lower(): v for k, v in (reuse or {}).items() if is_real_citation(v)}
     stats = {"formatted": 0, "reused": 0, "fallback": 0, "empty": 0, "tried": 0, "succeeded": 0}
@@ -290,6 +415,14 @@ def format_citations(
     local = threading.local()
 
     def lookup(item):
+        """Fetch one DOI's formatted citation within the rate limit.
+
+        Args:
+            item: ``(doi, bucket)``.
+
+        Returns:
+            The citation, or None.
+        """
         doi, bucket = item
         own = session or getattr(local, "session", None)
         if own is None:

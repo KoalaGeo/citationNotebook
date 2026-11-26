@@ -1,4 +1,9 @@
-"""The inventory: every DOI registered to the DataCite client, checked against DataCite's own total."""
+"""The inventory: every DOI registered to the DataCite client, checked against DataCite's own total.
+
+The inventory is the list of datasets every other stage works from. It is
+only replaced when the number of unique DOIs downloaded equals the total
+DataCite reports, so a truncated download never shrinks it.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +21,21 @@ DATACITE_DOIS = "https://api.datacite.org/dois"
 
 
 class InventoryIncomplete(RuntimeError):
-    pass
+    """Fewer unique DOIs were downloaded than DataCite reports for the client.
+
+    The inventory run fails and the previous inventory stays in use.
+    """
 
 
 def _orcid(creator: dict) -> str | None:
+    """The ORCID iD of a DataCite creator.
+
+    Args:
+        creator: One entry of a record's ``creators``.
+
+    Returns:
+        The bare iD (``0000-0002-1825-0097``), or None if the creator has none.
+    """
     for ident in creator.get("nameIdentifiers") or []:
         if not isinstance(ident, dict):
             continue
@@ -29,6 +45,15 @@ def _orcid(creator: dict) -> str | None:
 
 
 def parse_authors(creators) -> list[dict]:
+    """The authors of a DataCite record, in the form the store keeps them.
+
+    Args:
+        creators: The record's ``creators`` list, or None.
+
+    Returns:
+        A list of ``{name, given, family, orcid}`` dicts, with empty keys left
+        out.
+    """
     out = []
     for c in creators or []:
         if not isinstance(c, dict):
@@ -43,7 +68,16 @@ def parse_authors(creators) -> list[dict]:
 
 
 def parse_record(record: dict) -> tuple[dict, list[dict]]:
-    """(dataset row, related identifiers) from one DataCite JSON:API record."""
+    """A dataset row and its related identifiers from one DataCite record.
+
+    Args:
+        record: One item of the DataCite REST API's ``data`` array (JSON:API).
+
+    Returns:
+        ``(row, relations)``: the ``datasets`` row, and a list of
+        ``dataset_relations`` rows (relation type, related identifier and its
+        type). The DOI is lower case; it is empty when the record has none.
+    """
     a = record.get("attributes") or {}
     doi = (a.get("doi") or record.get("id") or "").strip().lower()
     publisher = a.get("publisher")
@@ -79,7 +113,21 @@ def parse_record(record: dict) -> tuple[dict, list[dict]]:
 
 
 def fetch_records(client, client_id: str) -> tuple[list[dict], int | None]:
-    """Every record of the client, by cursor paging (no 10,000-record limit, no skipped pages)."""
+    """Every DataCite record of a client, by cursor paging.
+
+    Cursor paging has no 10,000-record limit and skips no pages.
+
+    Args:
+        client: The HTTP client.
+        client_id: The DataCite client, for example ``bl.nerc``.
+
+    Returns:
+        ``(records, total)``: every record, and the total DataCite reported on
+        the first page (None if it gave none).
+
+    Raises:
+        citations.http.HttpError: If a page cannot be fetched.
+    """
     extra = {"affiliation": "true", "publisher": "true"}
     params = {"client-id": client_id, "page[size]": 1000, "page[cursor]": 1, **extra}
     url, records, total = DATACITE_DOIS, [], None
@@ -99,6 +147,15 @@ def fetch_records(client, client_id: str) -> tuple[list[dict], int | None]:
 
 
 def load_snapshot(path: Path) -> list[dict]:
+    """Read DataCite records saved by `save_snapshot` (or a raw API response).
+
+    Args:
+        path: A ``.json`` or ``.json.gz`` file holding a list of records or an
+            object with a ``data`` list.
+
+    Returns:
+        The records.
+    """
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -106,6 +163,12 @@ def load_snapshot(path: Path) -> list[dict]:
 
 
 def save_snapshot(records: list[dict], path: Path):
+    """Save downloaded DataCite records, so a later inventory can be run from them offline.
+
+    Args:
+        records: The records, as `fetch_records` returns them.
+        path: The ``.json.gz`` file to write; its folder is created if needed.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, "wt", encoding="utf-8") as handle:
@@ -113,6 +176,23 @@ def save_snapshot(records: list[dict], path: Path):
 
 
 def run_inventory(con, client, client_id: str, snapshot: Path | None = None, save_to: Path | None = None) -> str:
+    """Run the inventory stage.
+
+    Downloads every record of the client (or reads a snapshot), parses them,
+    and replaces the ``datasets`` and ``dataset_relations`` tables in one
+    transaction, but only if the number of unique DOIs equals DataCite's total.
+
+    Args:
+        con: An open store connection.
+        client: The HTTP client.
+        client_id: The DataCite client.
+        snapshot: Read the records from this file instead of the API.
+        save_to: Also save the downloaded records to this file.
+
+    Returns:
+        ``"success"`` or ``"failed"``. On failure the previous inventory stays
+        in use.
+    """
     run_id = db.start_run(con, "inventory")
     try:
         if snapshot:
